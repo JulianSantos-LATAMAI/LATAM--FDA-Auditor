@@ -18,17 +18,38 @@ Upload a food label image to audit it against FDA regulations.
 The AI will analyze visual elements like font sizes, bolding, and content placement.
 """)
 
-# Sidebar for API key
+# Load API key from Streamlit secrets
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+    api_key_loaded = True
+except (KeyError, FileNotFoundError):
+    api_key = None
+    api_key_loaded = False
+
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
-    api_key = st.text_input("OpenAI API Key", type="password", help="Enter your OpenAI API key")
+    
+    if api_key_loaded:
+        st.success("✅ API Key loaded from secrets")
+    else:
+        st.error("❌ API Key not found in secrets")
+        st.info("""
+        **To add your API key:**
+        
+        1. In Streamlit Cloud: Go to app settings → Secrets
+        2. Locally: Create `.streamlit/secrets.toml` with:
+        ```
+        OPENAI_API_KEY = "sk-your-key-here"
+        ```
+        """)
+    
     st.markdown("---")
     st.markdown("""
     ### How it works:
-    1. Enter your OpenAI API key
-    2. Upload a food label image
-    3. Click 'Analyze Label'
-    4. Review compliance results
+    1. Upload a food label image
+    2. Click 'Analyze Label'
+    3. Review compliance results
     """)
     st.markdown("---")
     st.caption("Powered by GPT-4o Vision")
@@ -62,11 +83,13 @@ with col2:
         st.info("Please create a nutrition_rules.txt file with your FDA regulations")
 
 # Analysis button
-if st.button("🔍 Analyze Label", type="primary", disabled=not (uploaded_file and api_key)):
+analyze_button_disabled = not (uploaded_file and api_key_loaded)
+
+if st.button("🔍 Analyze Label", type="primary", disabled=analyze_button_disabled):
     if not uploaded_file:
         st.warning("Please upload a label image")
-    elif not api_key:
-        st.warning("Please enter your OpenAI API key")
+    elif not api_key_loaded:
+        st.error("Please configure your OpenAI API key in Streamlit secrets")
     elif not rules_file.exists():
         st.error("nutrition_rules.txt file is missing")
     else:
@@ -143,7 +166,7 @@ FDA REGULATIONS:
                 
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
-                st.info("Please check your API key and try again")
+                st.info("Please check your API key configuration and try again")
 
 # Footer
 st.markdown("---")
