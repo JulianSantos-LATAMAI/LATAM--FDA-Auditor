@@ -4,6 +4,16 @@ import os
 import openai
 from pathlib import Path
 
+# Hides the default Streamlit branding
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # Page configuration
 st.set_page_config(
     page_title="FDA Label Compliance Auditor",
