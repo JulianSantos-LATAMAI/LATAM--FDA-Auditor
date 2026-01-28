@@ -66,7 +66,7 @@ with col1:
     )
     
     if uploaded_file:
-        st.image(uploaded_file, caption="Uploaded Label", use_container_width=True)
+        st.image(uploaded_file, caption="Uploaded Label", use_column_width=True)
 
 with col2:
     st.subheader("📋 Compliance Analysis")
