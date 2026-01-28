@@ -1,0 +1,36 @@
+[SOURCE: FDA 21 CFR 101.9 - Nutrition Labeling]
+
+[RULE: MANDATORY_NUTRIENTS_ORDER]
+The Nutrition Facts panel must list nutrients in this exact order:
+1. Calories
+2. Total Fat
+3. Saturated Fat
+4. Trans Fat
+5. Cholesterol
+6. Sodium
+7. Total Carbohydrate
+8. Dietary Fiber
+9. Total Sugars
+10. Includes Xg Added Sugars (Must be indented below Total Sugars)
+11. Protein
+12. Vitamin D
+13. Calcium
+14. Iron
+15. Potassium
+
+[RULE: FONT_SIZES]
+- The title "Nutrition Facts" must be the largest type on the label (larger than 16 point).
+- The numerical value for "Calories" must be at least 22 point font size.
+- The headings "Serving size" and "Servings per container" must be at least 10 point bold.
+- Nutrient names (e.g., "Total Fat", "Sodium") must be at least 8 point font.
+
+[RULE: VISUAL_FORMAT]
+- "Calories" must be in bold type.
+- "Added Sugars" must be declared as "Includes X g Added Sugars".
+- A thick bold line must separate "Calories" from the nutrient list.
+- Vitamins and minerals must declare both the quantitative amount (e.g., "20 mg") and the Percent Daily Value (% DV).
+
+[RULE: ROUNDING]
+- If Calories are less than 50, round to nearest 5 increments.
+- If Calories are greater than 50, round to nearest 10 increments.
+- Total Fat: If less than 0.5g, express as 0g.
