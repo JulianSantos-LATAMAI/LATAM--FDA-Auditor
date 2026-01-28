@@ -1,7 +1,7 @@
 import streamlit as st
 import base64
 import os
-from openai import OpenAI
+import openai
 from pathlib import Path
 
 # Page configuration
