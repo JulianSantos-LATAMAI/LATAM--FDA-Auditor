@@ -1,7 +1,9 @@
 [SOURCE: FDA 21 CFR 101.9 - Nutrition Labeling]
 
 [RULE: MANDATORY_NUTRIENTS_ORDER]
-The Nutrition Facts panel must list nutrients in this exact order:
+The Nutrition Facts panel must list nutrients in the following vertical sequence.
+NOTE: Standard visual separators (hairlines, white space, or small gaps) between nutrients are PERMITTED for readability, provided the sequence is correct.
+
 1. Calories
 2. Total Fat
 3. Saturated Fat
