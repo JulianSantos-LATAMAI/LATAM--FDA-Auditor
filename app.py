@@ -105,8 +105,9 @@ if st.button("🔍 Analyze Label", type="primary", disabled=analyze_button_disab
                 # Determine image type
                 image_type = uploaded_file.type
                 
-                # Initialize OpenAI client
-                client = OpenAI(api_key=api_key)
+                # Initialize OpenAI client with proper configuration
+                import openai
+                openai.api_key = api_key
                 
                 # Create the system prompt
                 system_prompt = f"""You are an expert FDA Compliance Officer. I will provide a set of strict rules. You must analyze the provided image. If the label violates a rule, cite the specific rule tag (e.g., [RULE: FONT_SIZES]) and explain the error. If it passes, say 'PASS'. Be extremely strict.
@@ -114,8 +115,9 @@ if st.button("🔍 Analyze Label", type="primary", disabled=analyze_button_disab
 FDA REGULATIONS:
 {rules_content}"""
                 
-                # Make API call
-                response = client.chat.completions.create(
+                # Make API call using the updated method
+                from openai import ChatCompletion
+                response = ChatCompletion.create(
                     model="gpt-4o",
                     messages=[
                         {
@@ -143,7 +145,7 @@ FDA REGULATIONS:
                 )
                 
                 # Extract and display the analysis
-                analysis = response.choices[0].message.content
+                analysis = response['choices'][0]['message']['content']
                 
                 st.markdown("---")
                 st.subheader("🔎 Audit Results")
