@@ -187,19 +187,13 @@ with st.sidebar:
 col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
-    st.subheader(f"📤 {t['upload']}")
-    
-    # Helpful context for LATAM exporters
-    if language == "Español":
-        st.info("""
-        💡 **Consejo**: Suba una foto clara de su etiqueta nutricional actual. 
-        El sistema analizará si cumple con las regulaciones de FDA de Estados Unidos.
-        """)
+    if operation_mode == "🔍 Audit Existing Label":
+        mode_description = "Upload an FDA-format label to audit" if language == "English" else "Suba una etiqueta formato FDA para auditar"
     else:
-        st.info("""
-        💡 **Tip**: Upload a clear photo of your current nutrition label. 
-        The system will check if it meets US FDA regulations.
-        """)
+        mode_description = "Upload your LATAM label to convert to FDA format" if language == "English" else "Suba su etiqueta LATAM para convertir a formato FDA"
+    
+    st.subheader(f"📤 {t['upload']}")
+    st.info(f"💡 **{mode_description}**")
     
     uploaded_file = st.file_uploader(
         "Choose label image / Elegir imagen de etiqueta",
@@ -245,14 +239,19 @@ with col2:
     if checks_passed:
         st.success("✅ Ready for analysis!")
 
-# Analysis button
+# Analysis/Conversion button
 st.markdown("---")
 
 col_btn1, col_btn2 = st.columns([3, 1])
 
 with col_btn1:
-    analyze_button = st.button(
-        f"🔍 {t['analyze']}",
+    if operation_mode == "🔍 Audit Existing Label":
+        button_text = f"🔍 {t['analyze']}"
+    else:
+        button_text = "🔄 Convert to FDA Format" if language == "English" else "🔄 Convertir a Formato FDA"
+    
+    action_button = st.button(
+        button_text,
         type="primary",
         disabled=not checks_passed,
         use_container_width=True
@@ -268,8 +267,253 @@ with col_btn2:
 if 'analysis_history' not in st.session_state:
     st.session_state.analysis_history = []
 
-# ANALYSIS ENGINE
-if analyze_button:
+# CONVERTER ENGINE
+if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
+    if not checks_passed:
+        st.error("❌ Cannot proceed. Please resolve issues above.")
+    else:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            # STEP 1: Extract nutritional data
+            status_text.text("📊 Step 1/3: Extracting data from your label..." if language == "English" else "📊 Paso 1/3: Extrayendo datos de su etiqueta...")
+            progress_bar.progress(20)
+            
+            image_bytes = uploaded_file.getvalue()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            image_type = uploaded_file.type
+            image_data_url = f"data:{image_type};base64,{base64_image}"
+            
+            openai.api_key = api_key
+            
+            extraction_prompt = """You are a nutrition label data extraction expert. Extract ALL nutritional information from this food label.
+
+TASK: Read this label (may be in Spanish or Portuguese) and extract data as JSON.
+
+REQUIRED JSON FORMAT (return ONLY valid JSON, no other text):
+{
+    "product_name": "exact product name from label",
+    "serving_size_original": "serving size as shown on label",
+    "serving_size_metric": "just the metric part (e.g., 30g or 240mL)",
+    "servings_per_container": "number as string",
+    "calories": "number as string",
+    "total_fat_g": "number",
+    "saturated_fat_g": "number",
+    "trans_fat_g": "number",
+    "cholesterol_mg": "number",
+    "sodium_mg": "number",
+    "total_carb_g": "number",
+    "fiber_g": "number",
+    "total_sugars_g": "number",
+    "added_sugars_g": "number or 0 if not specified",
+    "protein_g": "number",
+    "vitamin_d_mcg": "number or null if not present",
+    "calcium_mg": "number or null if not present",
+    "iron_mg": "number or null if not present",
+    "potassium_mg": "number or null if not present"
+}
+
+EXTRACTION RULES:
+- Extract exact numerical values
+- Convert all text to English nutrient names
+- If a nutrient is not on the label, use null
+- For Added Sugars, use 0 if not specified (many LATAM labels don't have this)
+- Be precise with numbers (preserve decimals if shown)"""
+
+            extraction_response = openai.ChatCompletion.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": extraction_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract all nutrition data from this label as JSON"},
+                            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "high"}}
+                        ]
+                    }
+                ],
+                max_tokens=1500,
+                temperature=0.0
+            )
+            
+            status_text.text("✅ Data extracted!" if language == "English" else "✅ ¡Datos extraídos!")
+            progress_bar.progress(40)
+            
+            # Parse JSON
+            data_text = extraction_response['choices'][0]['message']['content']
+            data_text = data_text.replace('```json', '').replace('```', '').strip()
+            nutrition_data = json.loads(data_text)
+            
+            # STEP 2: Convert serving size to US format
+            status_text.text("🔄 Step 2/3: Converting to US format..." if language == "English" else "🔄 Paso 2/3: Convirtiendo a formato USA...")
+            progress_bar.progress(60)
+            
+            # Smart serving size conversion
+            serving_metric = nutrition_data['serving_size_metric'].strip()
+            
+            # Common conversions
+            us_conversions = {
+                '30g': '2 tbsp (30g)', '15g': '1 tbsp (15g)', '240mL': '1 cup (240mL)',
+                '250mL': '1 cup (250mL)', '28g': '1 oz (28g)', '100g': '3.5 oz (100g)',
+                '200g': '7 oz (200g)', '150g': '5.3 oz (150g)', '50g': '1.8 oz (50g)',
+                '120mL': '1/2 cup (120mL)', '180mL': '3/4 cup (180mL)',
+                '15mL': '1 tbsp (15mL)', '5mL': '1 tsp (5mL)'
+            }
+            
+            us_serving = us_conversions.get(serving_metric, f"1 serving ({serving_metric})")
+            
+            # STEP 3: Generate FDA-format label as text
+            status_text.text("🎨 Step 3/3: Generating FDA label..." if language == "English" else "🎨 Paso 3/3: Generando etiqueta FDA...")
+            progress_bar.progress(80)
+            
+            # Calculate all %DVs
+            dvs = {
+                'fat': calculate_dv('fat', nutrition_data.get('total_fat_g', 0)),
+                'sat_fat': calculate_dv('sat_fat', nutrition_data.get('saturated_fat_g', 0)),
+                'cholesterol': calculate_dv('cholesterol', nutrition_data.get('cholesterol_mg', 0)),
+                'sodium': calculate_dv('sodium', nutrition_data.get('sodium_mg', 0)),
+                'carbs': calculate_dv('carbs', nutrition_data.get('total_carb_g', 0)),
+                'fiber': calculate_dv('fiber', nutrition_data.get('fiber_g', 0)),
+                'added_sugars': calculate_dv('added_sugars', nutrition_data.get('added_sugars_g', 0)),
+                'vitamin_d': calculate_dv('vitamin_d', nutrition_data.get('vitamin_d_mcg', 0)),
+                'calcium': calculate_dv('calcium', nutrition_data.get('calcium_mg', 0)),
+                'iron': calculate_dv('iron', nutrition_data.get('iron_mg', 0)),
+                'potassium': calculate_dv('potassium', nutrition_data.get('potassium_mg', 0))
+            }
+            
+            # Generate FDA-format label text
+            fda_label_text = f"""Nutrition Facts
+═══════════════════════════════════════════════
+Serving size        {us_serving}
+Servings per container    {nutrition_data.get('servings_per_container', 'About X')}
+═══════════════════════════════════════════════
+
+Calories                                    {nutrition_data.get('calories', '0')}
+───────────────────────────────────────────────
+                                    % Daily Value*
+Total Fat {nutrition_data.get('total_fat_g', '0')}g                              {dvs['fat']}%
+    Saturated Fat {nutrition_data.get('saturated_fat_g', '0')}g                      {dvs['sat_fat']}%
+    Trans Fat {nutrition_data.get('trans_fat_g', '0')}g
+Cholesterol {nutrition_data.get('cholesterol_mg', '0')}mg                          {dvs['cholesterol']}%
+Sodium {nutrition_data.get('sodium_mg', '0')}mg                                 {dvs['sodium']}%
+Total Carbohydrate {nutrition_data.get('total_carb_g', '0')}g                   {dvs['carbs']}%
+    Dietary Fiber {nutrition_data.get('fiber_g', '0')}g                          {dvs['fiber']}%
+    Total Sugars {nutrition_data.get('total_sugars_g', '0')}g
+        Includes {nutrition_data.get('added_sugars_g', '0')}g Added Sugars    {dvs['added_sugars']}%
+Protein {nutrition_data.get('protein_g', '0')}g
+
+Vitamin D {nutrition_data.get('vitamin_d_mcg', '0')}mcg                         {dvs['vitamin_d']}%
+Calcium {nutrition_data.get('calcium_mg', '0')}mg                            {dvs['calcium']}%
+Iron {nutrition_data.get('iron_mg', '0')}mg                                  {dvs['iron']}%
+Potassium {nutrition_data.get('potassium_mg', '0')}mg                        {dvs['potassium']}%
+───────────────────────────────────────────────
+* The % Daily Value (DV) tells you how much a nutrient in
+  a serving of food contributes to a daily diet. 2,000
+  calories a day is used for general nutrition advice."""
+            
+            progress_bar.progress(100)
+            status_text.text("✅ Conversion complete!" if language == "English" else "✅ ¡Conversión completa!")
+            
+            # Display results
+            st.markdown("---")
+            st.success("✅ " + ("FDA Label Generated Successfully!" if language == "English" else "¡Etiqueta FDA Generada Exitosamente!"))
+            
+            # Show original vs converted
+            col_compare1, col_compare2 = st.columns(2)
+            
+            with col_compare1:
+                st.subheader("📋 Original Label" if language == "English" else "📋 Etiqueta Original")
+                st.image(uploaded_file, use_column_width=True)
+            
+            with col_compare2:
+                st.subheader("📋 FDA-Format Label" if language == "English" else "📋 Etiqueta Formato FDA")
+                st.code(fda_label_text, language="text")
+            
+            # Show extracted data
+            with st.expander("🔍 " + ("View Extracted Data" if language == "English" else "Ver Datos Extraídos")):
+                st.json(nutrition_data)
+            
+            # Key conversions made
+            st.markdown("---")
+            st.subheader("🔄 " + ("Conversions Applied" if language == "English" else "Conversiones Aplicadas"))
+            
+            conversion_notes = []
+            if serving_metric != us_serving:
+                conversion_notes.append(f"✅ Serving size: `{serving_metric}` → `{us_serving}`")
+            
+            if nutrition_data.get('added_sugars_g') == '0':
+                conversion_notes.append("✅ Added 'Added Sugars' line (0g) - required by FDA even if not on original")
+            
+            conversion_notes.append(f"✅ Calculated all %DV values per FDA standards")
+            conversion_notes.append(f"✅ Formatted in FDA-required sequence")
+            conversion_notes.append(f"✅ Added FDA footer text")
+            
+            for note in conversion_notes:
+                st.markdown(note)
+            
+            # Download options
+            st.markdown("---")
+            st.subheader("📥 " + ("Download Options" if language == "English" else "Opciones de Descarga"))
+            
+            col_dl1, col_dl2 = st.columns(2)
+            
+            with col_dl1:
+                # Text version
+                st.download_button(
+                    "📄 " + ("Download as Text File" if language == "English" else "Descargar como Texto"),
+                    data=fda_label_text,
+                    file_name=f"FDA_Label_{nutrition_data.get('product_name', 'product').replace(' ', '_')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+            
+            with col_dl2:
+                # JSON data
+                st.download_button(
+                    "📊 " + ("Download as JSON" if language == "English" else "Descargar como JSON"),
+                    data=json.dumps(nutrition_data, indent=2, ensure_ascii=False),
+                    file_name=f"FDA_Data_{nutrition_data.get('product_name', 'product').replace(' ', '_')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            # Next steps guidance
+            st.markdown("---")
+            st.info("""
+            **📝 Next Steps:**
+            1. ✅ Download the FDA-format label text above
+            2. 📋 Copy this text to your graphic designer
+            3. 🎨 Have them create the final label design with proper fonts/layout
+            4. 🔍 Upload the final design back here to audit it
+            5. 🚀 Print and apply to your products for US export!
+            """ if language == "English" else """
+            **📝 Próximos Pasos:**
+            1. ✅ Descargue el texto de la etiqueta FDA arriba
+            2. 📋 Copie este texto a su diseñador gráfico
+            3. 🎨 Que creen el diseño final con las fuentes/formato adecuados
+            4. 🔍 Suba el diseño final aquí para auditarlo
+            5. 🚀 ¡Imprima y aplique a sus productos para exportar a USA!
+            """)
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+        except json.JSONDecodeError as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error("❌ " + ("Could not parse nutrition data. The AI may not have returned valid JSON." if language == "English" else "No se pudo analizar los datos. La IA puede no haber devuelto JSON válido."))
+            with st.expander("🔍 " + ("Debug Info" if language == "English" else "Info de Depuración")):
+                st.code(data_text)
+                st.info("Try uploading a clearer image or contact support.")
+                
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ Conversion failed: {str(e)}")
+
+# AUDIT ENGINE (original functionality)
+elif operation_mode == "🔍 Audit Existing Label" and action_button:
     if not checks_passed:
         st.error("❌ Cannot run analysis. Please resolve issues above.")
     else:
