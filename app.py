@@ -477,15 +477,19 @@ if 'last_analysis' in st.session_state:
     # Status display
     col_status, col_info = st.columns([2, 1])
     
+    export_ready = result.get('export_ready', False)
+    needs_fixes = result.get('needs_fixes', False)
+    origin = result.get('origin_country', 'LATAM')
+    
     with col_status:
-        if result['export_ready']:
+        if export_ready:
             st.markdown("""
             <div class="status-box pass-box">
                 <h2>✅ EXPORT READY!</h2>
                 <p>Your label meets US FDA requirements</p>
             </div>
             """, unsafe_allow_html=True)
-        elif result['needs_fixes']:
+        elif needs_fixes:
             st.markdown("""
             <div class="status-box warning-box">
                 <h2>⚠️ NEEDS FIXES</h2>
@@ -502,7 +506,7 @@ if 'last_analysis' in st.session_state:
     
     with col_info:
         st.metric("Analysis Date", result['timestamp'].strftime("%Y-%m-%d"))
-        st.metric("Origin", result['origin_country'])
+        st.metric("Origin", origin)
         st.metric("Target", "🇺🇸 USA")
     
     # Detailed analysis
