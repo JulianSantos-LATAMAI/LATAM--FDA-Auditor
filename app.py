@@ -254,55 +254,63 @@ if analyze_button:
 ANALYSIS PRIORITIES (in order of importance):
 
 1. CRITICAL MATHEMATICAL ERRORS
-   - [RULE: CALORIE_CALCULATION] Verify calories = (Fat × 9) + (Carbs × 4) + (Protein × 4)
-   - Allow ±10% tolerance for rounding
-   - FAIL if discrepancy exceeds 10%
+   - [RULE: CALORIE_CALCULATION] Verify calories using: (Fat × 9) + (Carbs × 4) + (Protein × 4)
+   - IMPORTANT: FDA allows rounding, so allow ±15% tolerance
+   - IMPORTANT: If the calculated value is within 15% of declared calories, that's ACCEPTABLE
+   - Example: Declared=200, Calculated=210 → Difference is 5%, which is PASS
+   - Only FAIL if the discrepancy exceeds 15% AND the difference is more than 20 calories
+   - Show your calculation in the output for transparency
 
 2. MANDATORY CONTENT ERRORS
    - [RULE: REQUIRED_NUTRIENTS] All mandatory nutrients must be present and in correct order
-   - [RULE: ALLERGEN_DECLARATION] Cross-check ingredients vs "Contains" statement
+   - [RULE: ALLERGEN_DECLARATION] Cross-check ingredients vs "Contains" statement (if visible)
    - [RULE: SERVING_SIZE] Must be declared and reasonable for product type
-   - FAIL if any required element is missing
+   - FAIL if any required element is clearly missing
 
 3. FORMATTING & SPELLING
    - [RULE: SPELLING] Check for misspellings (e.g., "Cholestrol" instead of "Cholesterol")
    - [RULE: UNITS] Verify correct units (g, mg, mcg) are used appropriately
    - [RULE: PERCENT_DV] % Daily Value must be shown for applicable nutrients
-   - FAIL for obvious spelling errors
+   - FAIL only for obvious spelling errors that would confuse consumers
 
 4. VISUAL HIERARCHY (Manual Check Zone)
    - [RULE: FONT_SIZES] You CANNOT measure exact point sizes from images
-   - For fonts: If "Nutrition Facts" title looks substantially smaller than body text → FAIL
-   - If fonts look reasonable but you're unsure of exact size → "⚠️ MANUAL CHECK: Verify font sizes meet FDA minimums"
-   - DO NOT fail labels for font sizes unless they're obviously wrong
+   - For fonts: Only FAIL if "Nutrition Facts" title is smaller than or equal to body text
+   - If fonts look reasonable → "✅ PASS"
+   - If fonts look borderline → "⚠️ MANUAL CHECK: Verify font sizes meet FDA minimums"
+   - DO NOT fail labels for font sizes unless they're obviously, visibly wrong
 
 5. VISUAL FORMAT (Assessment Only)
-   - [RULE: BOLD_ELEMENTS] Check if "Calories" and key elements appear bold
-   - [RULE: SEPARATORS] Look for required separator lines
-   - If missing → FAIL; If present but unclear → MANUAL CHECK
+   - [RULE: BOLD_ELEMENTS] Check if "Calories" appears bold or emphasized
+   - [RULE: SEPARATORS] Look for separator lines between sections
+   - If clearly missing → FAIL; If present → PASS; If unclear → MANUAL CHECK
 
 FDA REGULATIONS REFERENCE:
 {rules_content}
 
 OUTPUT FORMAT:
-Structure your response as follows:
-
 **COMPLIANCE STATUS: [PASS / FAIL / NEEDS REVIEW]**
 
 **CRITICAL ISSUES (Must Fix):**
-- [List only actual violations that require label rejection]
+- [Only list violations that absolutely require label rejection]
+- [Include your calculations for transparency]
 
 **WARNINGS (Manual Verification Needed):**
-- [List borderline items that need human measurement/verification]
+- [Borderline items requiring human measurement/verification]
 
-**ADVISORY NOTES (Optional Improvements):**
-- [List minor suggestions that don't affect compliance]
+**ADVISORY NOTES (Optional):**
+- [Minor suggestions that don't affect compliance]
 
-DECISION RULES:
-- Return "PASS" only if NO critical issues found
-- Return "FAIL" if ANY critical mathematical, content, or spelling errors exist
-- Return "NEEDS REVIEW" if only font/visual warnings exist
-- Always be specific about WHAT is wrong and WHY it violates the rule"""
+**CALORIE CALCULATION (Show Your Work):**
+- Declared Calories: [X]
+- Calculated: (Fat × 9) + (Carbs × 4) + (Protein × 4) = [Y]
+- Difference: [Z]% → [PASS/FAIL]
+
+CRITICAL REMINDERS:
+- BE GENEROUS with rounding tolerance - FDA allows flexibility
+- ONLY fail for obvious, clear violations
+- When in doubt, use MANUAL CHECK instead of FAIL
+- Focus on consumer safety and clarity, not nitpicking"""
             
             # Step 4: Make API call
             status_text.text("🤖 Analyzing label with AI vision model...")
