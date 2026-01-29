@@ -249,13 +249,13 @@ if analyze_button:
             status_text.text("📋 Loading FDA regulations...")
             progress_bar.progress(60)
             
-       system_prompt = f"""You are an FDA Compliance Assistant conducting a practical audit of a nutrition label. Your role is to identify CRITICAL errors that would require label rejection, while flagging borderline cases for human review.
+            system_prompt = f"""You are an FDA Compliance Assistant conducting a practical audit of a nutrition label. Your role is to identify CRITICAL errors that would require label rejection, while flagging borderline cases for human review.
 
 ANALYSIS PRIORITIES (in order of importance):
 
 1. CRITICAL MATHEMATICAL ERRORS
    - [RULE: CALORIE_CALCULATION] Verify calories = (Fat × 9) + (Carbs × 4) + (Protein × 4)
-   - Allow ±10% tolerance for rounding (not ±20%, as that's too permissive)
+   - Allow ±10% tolerance for rounding
    - FAIL if discrepancy exceeds 10%
 
 2. MANDATORY CONTENT ERRORS
@@ -343,7 +343,7 @@ DECISION RULES:
             analysis = response['choices'][0]['message']['content']
             
             # Determine compliance status
-            is_compliant = "COMPLIANCE STATUS: PASS" in analysis
+            is_compliant = "COMPLIANCE STATUS: PASS" in analysis or "NEEDS REVIEW" in analysis
             
             # Store in session state
             st.session_state.last_analysis = {
