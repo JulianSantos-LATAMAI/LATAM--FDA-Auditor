@@ -26,6 +26,8 @@ NOTE: Standard visual separators (hairlines, white space, or small gaps) between
 - The headings "Serving size" and "Servings per container" must be at least 10 point bold.
 - Nutrient names (e.g., "Total Fat", "Sodium") must be at least 8 point font.
 
+"Assume the full image represents a standard printed label. Estimate font sizes based on visual proportion. If the 'Calories' number is not at least 20% of the header section height, mark as [RULE: CALORIES_SIZE_FAIL]."
+
 [RULE: VISUAL_FORMAT]
 - "Calories" must be in bold type.
 - "Added Sugars" must be declared as "Includes X g Added Sugars".
