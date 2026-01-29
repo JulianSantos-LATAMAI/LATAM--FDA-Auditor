@@ -463,10 +463,13 @@ if 'last_analysis' in st.session_state:
     result = st.session_state.last_analysis
     
     # Savings display
+    cost_saved = result.get('cost_saved', 495)
+    time_saved = result.get('time_saved', 14)
+    
     st.markdown(f"""
     <div class="savings-badge">
         <h3 style="margin:0;">{t['savings']}</h3>
-        <h2 style="margin:0.5rem 0;">${result['cost_saved']} USD • {result['time_saved']} days</h2>
+        <h2 style="margin:0.5rem 0;">${cost_saved} USD • {time_saved} days</h2>
         <p style="margin:0;">vs traditional consultant</p>
     </div>
     """, unsafe_allow_html=True)
