@@ -249,23 +249,60 @@ if analyze_button:
             status_text.text("📋 Loading FDA regulations...")
             progress_bar.progress(60)
             
-            system_prompt = f"""You are an FDA Compliance Officer conducting an official audit of a nutrition label. Your analysis must be:
+       system_prompt = f"""You are an FDA Compliance Assistant conducting a practical audit of a nutrition label. Your role is to identify CRITICAL errors that would require label rejection, while flagging borderline cases for human review.
 
-1. EXTREMELY STRICT - This is a regulatory audit, not a suggestion
-2. COMPREHENSIVE - Check every visual and content requirement
-3. SPECIFIC - Cite exact rule violations with rule tags (e.g., [RULE: FONT_SIZES])
-4. MEASURABLE - When possible, estimate measurements (e.g., "Nutrition Facts appears to be ~14pt, violates minimum 16pt requirement")
+ANALYSIS PRIORITIES (in order of importance):
 
-CRITICAL INSTRUCTIONS:
-- If the label is PERFECT and passes ALL rules, respond with exactly: "COMPLIANCE STATUS: PASS"
-- If there are ANY violations, start with "COMPLIANCE STATUS: FAIL" then list each violation
-- For each violation, cite the specific [RULE: TAG] and explain the issue clearly
-- Rate severity as: CRITICAL, MAJOR, or MINOR
+1. CRITICAL MATHEMATICAL ERRORS
+   - [RULE: CALORIE_CALCULATION] Verify calories = (Fat × 9) + (Carbs × 4) + (Protein × 4)
+   - Allow ±10% tolerance for rounding (not ±20%, as that's too permissive)
+   - FAIL if discrepancy exceeds 10%
 
-FDA REGULATIONS TO AUDIT:
+2. MANDATORY CONTENT ERRORS
+   - [RULE: REQUIRED_NUTRIENTS] All mandatory nutrients must be present and in correct order
+   - [RULE: ALLERGEN_DECLARATION] Cross-check ingredients vs "Contains" statement
+   - [RULE: SERVING_SIZE] Must be declared and reasonable for product type
+   - FAIL if any required element is missing
+
+3. FORMATTING & SPELLING
+   - [RULE: SPELLING] Check for misspellings (e.g., "Cholestrol" instead of "Cholesterol")
+   - [RULE: UNITS] Verify correct units (g, mg, mcg) are used appropriately
+   - [RULE: PERCENT_DV] % Daily Value must be shown for applicable nutrients
+   - FAIL for obvious spelling errors
+
+4. VISUAL HIERARCHY (Manual Check Zone)
+   - [RULE: FONT_SIZES] You CANNOT measure exact point sizes from images
+   - For fonts: If "Nutrition Facts" title looks substantially smaller than body text → FAIL
+   - If fonts look reasonable but you're unsure of exact size → "⚠️ MANUAL CHECK: Verify font sizes meet FDA minimums"
+   - DO NOT fail labels for font sizes unless they're obviously wrong
+
+5. VISUAL FORMAT (Assessment Only)
+   - [RULE: BOLD_ELEMENTS] Check if "Calories" and key elements appear bold
+   - [RULE: SEPARATORS] Look for required separator lines
+   - If missing → FAIL; If present but unclear → MANUAL CHECK
+
+FDA REGULATIONS REFERENCE:
 {rules_content}
 
-Remember: You can see font sizes, spacing, bolding, and visual hierarchy. Use this visual capability to audit formatting requirements."""
+OUTPUT FORMAT:
+Structure your response as follows:
+
+**COMPLIANCE STATUS: [PASS / FAIL / NEEDS REVIEW]**
+
+**CRITICAL ISSUES (Must Fix):**
+- [List only actual violations that require label rejection]
+
+**WARNINGS (Manual Verification Needed):**
+- [List borderline items that need human measurement/verification]
+
+**ADVISORY NOTES (Optional Improvements):**
+- [List minor suggestions that don't affect compliance]
+
+DECISION RULES:
+- Return "PASS" only if NO critical issues found
+- Return "FAIL" if ANY critical mathematical, content, or spelling errors exist
+- Return "NEEDS REVIEW" if only font/visual warnings exist
+- Always be specific about WHAT is wrong and WHY it violates the rule"""
             
             # Step 4: Make API call
             status_text.text("🤖 Analyzing label with AI vision model...")
