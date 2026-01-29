@@ -34,7 +34,15 @@ NOTE: Standard visual separators (hairlines, white space, or small gaps) between
 - A thick bold line must separate "Calories" from the nutrient list.
 - Vitamins and minerals must declare both the quantitative amount (e.g., "20 mg") and the Percent Daily Value (% DV).
 
-[RULE: ROUNDING]
-- If Calories are less than 50, round to nearest 5 increments.
-- If Calories are greater than 50, round to nearest 10 increments.
-- Total Fat: If less than 0.5g, express as 0g.
+[RULE: CALORIE_CALCULATION_TOLERANCE]
+CRITICAL INSTRUCTION FOR AI:
+When calculating calories, you MUST:
+1. Calculate: (Total Fat g × 9) + (Total Carbohydrate g × 4) + (Protein g × 4)
+2. Compare to declared calories
+3. FDA allows rounding - use 15% OR 20 calorie tolerance (whichever is LARGER)
+4. Example calculations:
+   - Declared: 200, Calculated: 210 → Difference is 10 cal (5%) → PASS ✅
+   - Declared: 100, Calculated: 118 → Difference is 18 cal (18%) but under 20 cal → PASS ✅
+   - Declared: 200, Calculated: 240 → Difference is 40 cal (20%) → FAIL ❌
+5. ONLY fail if BOTH conditions are true: >15% AND >20 calories difference
+6. Always show your calculation in the output
