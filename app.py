@@ -146,13 +146,6 @@ except (KeyError, FileNotFoundError):
 with st.sidebar:
     st.header(f"⚙️ {t['config']}")
     
-    # Target market selector
-    target_market = st.selectbox(
-        "🎯 Export Destination",
-        ["🇺🇸 United States (FDA)", "🇨🇦 Canada (CFIA)", "🇪🇺 European Union (EFSA)"],
-        help="Select your target market"
-    )
-    
     # API Status
     if api_key_loaded:
         st.success("✅ System: Active")
@@ -161,12 +154,11 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Country selector for specific guidance
+    # Country selector - focused on top 4 LATAM markets
     origin_country = st.selectbox(
         "🏭 Your Country / Su País",
-        ["🇲🇽 Mexico", "🇧🇷 Brazil", "🇨🇴 Colombia", "🇦🇷 Argentina", 
-         "🇨🇱 Chile", "🇵🇪 Peru", "🇪🇨 Ecuador", "Other LATAM"],
-        help="Helps us provide country-specific guidance"
+        ["🇲🇽 Mexico", "🇨🇴 Colombia", "🇨🇱 Chile", "🇧🇷 Brazil"],
+        help="Select your country of origin"
     )
     
     st.markdown("---")
@@ -1000,24 +992,46 @@ with tab2:
     - [Nutrition Facts Label Requirements](https://www.fda.gov/food/new-nutrition-facts-label/how-understand-and-use-nutrition-facts-label)
     
     **Common Mistakes LATAM Exporters Make:**
-    1. ❌ Label only in Spanish (must have English)
-    2. ❌ Using only metric units (need US customary as primary)
+    1. ❌ Label only in Spanish/Portuguese (must have English)
+    2. ❌ Using only metric units without household measures
     3. ❌ Wrong serving size standards
-    4. ❌ Missing allergen declarations
-    5. ❌ Incorrect calorie calculations
+    4. ❌ Missing "Added Sugars" declaration
+    5. ❌ Incorrect %DV calculations
     
-    **Country-Specific Tips:**
-    - 🇲🇽 **Mexico**: NOM-051 differs significantly from FDA - don't assume compatibility
-    - 🇧🇷 **Brazil**: ANVISA serving sizes often differ from FDA standards
-    - 🇨🇴 **Colombia**: Resolution 810 has different rounding rules
-    - 🇦🇷 **Argentina**: CAA requirements vary from FDA nutrient order
+    **Country-Specific Regulatory Differences:**
     
-    **Next Steps After Analysis:**
-    1. Fix all "EXPORT BLOCKERS" immediately
-    2. Address "COMPLIANCE ISSUES" before production
-    3. Consider "RECOMMENDATIONS" for market success
-    4. Get final review from FDA-registered consultant
-    5. Submit to FDA for official approval if required
+    **🇲🇽 Mexico (NOM-051-SCFI/SSA1-2010):**
+    - Uses front-of-package warning labels (not required in USA)
+    - Different serving size standards
+    - May not require Added Sugars declaration
+    - Trans fat limits differ from FDA
+    
+    **🇨🇴 Colombia (Resolution 2492/2022):**
+    - Uses front-of-package warning stamps
+    - Different nutrient rounding rules
+    - May group some nutrients differently
+    - Sodium limits more strict than FDA
+    
+    **🇨🇱 Chile (Law 20.606):**
+    - "Alto en" (High in) warning system not used in USA
+    - Different portion size standards
+    - May not separate Added Sugars
+    - Front labels required (not in USA)
+    
+    **🇧🇷 Brazil (RDC 429/2020):**
+    - ANVISA uses different serving sizes than FDA
+    - Front-of-pack nutrition labeling differs
+    - Different %DV reference values
+    - May use "Valor Energético" instead of Calories
+    
+    **Key Takeaway:** Your home country's compliant label likely needs significant changes for USA market!
+    
+    **Next Steps After Using This Tool:**
+    1. Fix all "CRITICAL VIOLATIONS" immediately
+    2. Address "ADVISORIES" before production
+    3. Have your designer create final label with FDA format
+    4. Consider hiring FDA consultant for final review ($200-500)
+    5. Submit sample to FDA if product requires pre-approval
     """)
 
 with tab3:
