@@ -94,6 +94,24 @@ translations = {
 
 t = translations[language]
 
+# Helper function to calculate %DV (defined at module level)
+def calculate_dv(nutrient_type, amount):
+    """Calculate % Daily Value based on FDA standards"""
+    try:
+        amount_num = float(amount) if amount else 0
+    except (ValueError, TypeError):
+        return 0
+    
+    dv_values = {
+        'fat': 78, 'sat_fat': 20, 'cholesterol': 300, 'sodium': 2300,
+        'carbs': 275, 'fiber': 28, 'added_sugars': 50, 'vitamin_d': 20,
+        'calcium': 1300, 'iron': 18, 'potassium': 4700
+    }
+    
+    if nutrient_type in dv_values and dv_values[nutrient_type] > 0:
+        return round((amount_num / dv_values[nutrient_type]) * 100)
+    return 0
+
 # Title
 st.markdown(f'<p class="main-header">{t["title"]}</p>', unsafe_allow_html=True)
 st.markdown(f'<p class="sub-header">{t["subtitle"]}</p>', unsafe_allow_html=True)
