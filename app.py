@@ -106,6 +106,16 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Operation mode selector (MOVED HERE - before it's used)
+operation_mode = st.radio(
+    "🔧 Select Tool Mode:",
+    ["🔍 Audit Existing Label", "🔄 Convert LATAM Label to FDA Format"],
+    horizontal=True,
+    help="Choose whether to audit an existing FDA label or convert a LATAM label to FDA format"
+)
+
+st.markdown("---")
+
 # Load API key
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
