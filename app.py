@@ -344,25 +344,25 @@ def generate_fda_label_html(nutrition_data):
             <div class="thick-bar"></div>
             
             <div class="nutrient-row">
-                <span>Vitamin D {nutrition_data.get('vitamin_d_mcg', '0')}mcg</span>
+                <span>Vitamin D {nutrition_data.get('vitamin_d_mcg') or '0'}mcg</span>
                 <span class="dv-value">{dvs['vitamin_d']}%</span>
             </div>
             <div class="thin-bar"></div>
             
             <div class="nutrient-row">
-                <span>Calcium {nutrition_data.get('calcium_mg', '0')}mg</span>
+                <span>Calcium {nutrition_data.get('calcium_mg') or '0'}mg</span>
                 <span class="dv-value">{dvs['calcium']}%</span>
             </div>
             <div class="thin-bar"></div>
             
             <div class="nutrient-row">
-                <span>Iron {nutrition_data.get('iron_mg', '0')}mg</span>
+                <span>Iron {nutrition_data.get('iron_mg') or '0'}mg</span>
                 <span class="dv-value">{dvs['iron']}%</span>
             </div>
             <div class="thin-bar"></div>
             
             <div class="nutrient-row">
-                <span>Potassium {nutrition_data.get('potassium_mg', '0')}mg</span>
+                <span>Potassium {nutrition_data.get('potassium_mg') or '0'}mg</span>
                 <span class="dv-value">{dvs['potassium']}%</span>
             </div>
             
