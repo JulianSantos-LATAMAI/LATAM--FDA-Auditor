@@ -5,13 +5,498 @@ import openai
 from pathlib import Path
 from datetime import datetime
 import json
+import re
+from typing import Dict, List, Tuple, Optional
 
-from fda_validator import (
-    FDALabelValidator, 
-    EnhancedFDAConverter, 
-    ENHANCED_EXTRACTION_PROMPT,
-    generate_fda_compliant_label_html
-)
+# ============================================================================
+# FDA VALIDATOR CLASSES - INTEGRATED DIRECTLY
+# ============================================================================
+
+class FDALabelValidator:
+    """Validates and corrects nutrition data according to FDA standards"""
+    
+    # FDA Daily Values (21 CFR 101.9)
+    FDA_DAILY_VALUES = {
+        'total_fat': 78,
+        'saturated_fat': 20,
+        'cholesterol': 300,
+        'sodium': 2300,
+        'total_carb': 275,
+        'fiber': 28,
+        'added_sugars': 50,
+        'protein': 50,
+        'vitamin_d': 20,
+        'calcium': 1300,
+        'iron': 18,
+        'potassium': 4700
+    }
+    
+    @staticmethod
+    def calculate_percent_dv(nutrient: str, amount: float) -> int:
+        """Calculate %DV according to FDA standards"""
+        if nutrient not in FDALabelValidator.FDA_DAILY_VALUES:
+            return 0
+        
+        dv = FDALabelValidator.FDA_DAILY_VALUES[nutrient]
+        if dv == 0:
+            return 0
+        
+        percent = (amount / dv) * 100
+        return round(percent)
+    
+    @staticmethod
+    def validate_calorie_calculation(data: Dict) -> Tuple[bool, str, float]:
+        """
+        Validate calorie calculation using Atwater factors
+        Returns: (is_valid, message, calculated_calories)
+        """
+        try:
+            fat_g = float(data.get('total_fat_g', 0))
+            carb_g = float(data.get('total_carb_g', 0))
+            protein_g = float(data.get('protein_g', 0))
+            
+            # Atwater factors: Fat=9, Carb=4, Protein=4
+            calculated = (fat_g * 9) + (carb_g * 4) + (protein_g * 4)
+            calculated = round(calculated)
+            
+            stated_calories = float(data.get('calories', 0))
+            
+            # FDA allows ±15% tolerance
+            tolerance = 0.15
+            lower_bound = calculated * (1 - tolerance)
+            upper_bound = calculated * (1 + tolerance)
+            
+            if lower_bound <= stated_calories <= upper_bound:
+                return True, "Calorie calculation verified", calculated
+            else:
+                return False, f"Calorie mismatch: Stated {stated_calories}, Calculated {calculated}", calculated
+                
+        except (ValueError, TypeError) as e:
+            return False, f"Error validating calories: {str(e)}", 0
+    
+    @staticmethod
+    def convert_metric_to_us_serving(metric_str: str) -> str:
+        """Convert metric serving sizes to US household measures"""
+        metric_str = metric_str.strip().lower()
+        
+        conversions = {
+            '30g': '2 tbsp (30g)', '28g': '1 oz (28g)', '15g': '1 tbsp (15g)',
+            '50g': '1/4 cup (50g)', '100g': '3.5 oz (100g)', '150g': '5.3 oz (150g)',
+            '200g': '7 oz (200g)', '227g': '8 oz (227g)',
+            '240ml': '1 cup (240mL)', '250ml': '1 cup (250mL)', '120ml': '1/2 cup (120mL)',
+            '180ml': '3/4 cup (180mL)', '15ml': '1 tbsp (15mL)', '5ml': '1 tsp (5mL)',
+            '355ml': '12 fl oz (355mL)', '500ml': '2 cups (500mL)',
+        }
+        
+        if metric_str in conversions:
+            return conversions[metric_str]
+        
+        match = re.match(r'(\d+\.?\d*)\s*(g|ml)', metric_str)
+        if match:
+            amount = float(match.group(1))
+            unit = match.group(2)
+            
+            if unit == 'g':
+                if amount <= 15:
+                    return f"1 tbsp ({int(amount)}g)"
+                elif amount <= 30:
+                    return f"2 tbsp ({int(amount)}g)"
+                elif amount <= 100:
+                    return f"1/4 cup ({int(amount)}g)"
+                else:
+                    oz = round(amount / 28.35, 1)
+                    return f"{oz} oz ({int(amount)}g)"
+            
+            elif unit == 'ml':
+                if amount <= 15:
+                    return f"1 tbsp ({int(amount)}mL)"
+                elif amount <= 120:
+                    cups = round(amount / 240, 2)
+                    return f"{cups} cup ({int(amount)}mL)"
+                else:
+                    fl_oz = round(amount / 29.57, 1)
+                    return f"{fl_oz} fl oz ({int(amount)}mL)"
+        
+        return f"1 serving ({metric_str})"
+
+
+class EnhancedFDAConverter:
+    """Enhanced converter with full FDA compliance validation"""
+    
+    def __init__(self):
+        self.validator = FDALabelValidator()
+        self.warnings = []
+        self.errors = []
+    
+    def extract_and_validate(self, nutrition_data: Dict) -> Dict:
+        """Extract, validate, and correct nutrition data for FDA compliance"""
+        self.warnings = []
+        self.errors = []
+        
+        # Validate and correct numeric values
+        corrected_data = self._validate_numeric_values(nutrition_data)
+        
+        # Validate calorie calculation
+        is_valid, message, calculated = self.validator.validate_calorie_calculation(corrected_data)
+        if not is_valid:
+            self.warnings.append(message)
+        
+        # Convert serving size
+        if 'serving_size_metric' in corrected_data:
+            us_serving = self.validator.convert_metric_to_us_serving(
+                corrected_data['serving_size_metric']
+            )
+            corrected_data['serving_size_us'] = us_serving
+        
+        # Calculate all %DV values
+        corrected_data['percent_dv'] = self._calculate_all_dv(corrected_data)
+        
+        # Add validation report
+        corrected_data['validation_report'] = {
+            'is_compliant': len(self.errors) == 0,
+            'warnings': self.warnings,
+            'errors': self.errors
+        }
+        
+        return corrected_data
+    
+    def _validate_numeric_values(self, data: Dict) -> Dict:
+        """Ensure all numeric values are valid"""
+        corrected = data.copy()
+        
+        numeric_fields = [
+            'calories', 'total_fat_g', 'saturated_fat_g', 'trans_fat_g',
+            'cholesterol_mg', 'sodium_mg', 'total_carb_g', 'fiber_g',
+            'total_sugars_g', 'added_sugars_g', 'protein_g',
+            'vitamin_d_mcg', 'calcium_mg', 'iron_mg', 'potassium_mg'
+        ]
+        
+        for field in numeric_fields:
+            if field in corrected:
+                try:
+                    value = corrected[field]
+                    if value is None or value == '':
+                        corrected[field] = '0'
+                    else:
+                        float_val = float(value)
+                        if float_val < 0:
+                            self.errors.append(f"{field} cannot be negative")
+                            corrected[field] = '0'
+                        else:
+                            corrected[field] = str(float_val)
+                except (ValueError, TypeError):
+                    self.errors.append(f"Invalid numeric value for {field}")
+                    corrected[field] = '0'
+            else:
+                corrected[field] = '0'
+        
+        return corrected
+    
+    def _calculate_all_dv(self, data: Dict) -> Dict:
+        """Calculate all %DV values"""
+        dv_values = {}
+        
+        mappings = {
+            'total_fat': 'total_fat_g',
+            'saturated_fat': 'saturated_fat_g',
+            'cholesterol': 'cholesterol_mg',
+            'sodium': 'sodium_mg',
+            'total_carb': 'total_carb_g',
+            'fiber': 'fiber_g',
+            'added_sugars': 'added_sugars_g',
+            'vitamin_d': 'vitamin_d_mcg',
+            'calcium': 'calcium_mg',
+            'iron': 'iron_mg',
+            'potassium': 'potassium_mg'
+        }
+        
+        for nutrient, field in mappings.items():
+            if field in data:
+                try:
+                    amount = float(data[field])
+                    dv = self.validator.calculate_percent_dv(nutrient, amount)
+                    dv_values[nutrient] = dv
+                except (ValueError, TypeError):
+                    dv_values[nutrient] = 0
+        
+        return dv_values
+
+
+# Enhanced extraction prompt
+ENHANCED_EXTRACTION_PROMPT = """You are an expert FDA nutrition label data extractor. Extract ALL nutritional information from this food label with PERFECT accuracy.
+
+CRITICAL INSTRUCTIONS:
+1. Extract EXACT numbers as they appear
+2. Convert nutrient names to English (if in Spanish/Portuguese)
+3. Return ONLY valid JSON - no markdown, no explanations
+4. If a value is not on label, use null
+5. For Added Sugars: use null if not present (many LATAM labels don't have this)
+
+REQUIRED JSON FORMAT:
+{
+    "product_name": "exact product name",
+    "serving_size_original": "original serving size text",
+    "serving_size_metric": "numeric + unit (e.g., '30g' or '240mL')",
+    "servings_per_container": "number or 'About X'",
+    "calories": "number",
+    "total_fat_g": "number",
+    "saturated_fat_g": "number",
+    "trans_fat_g": "number",
+    "cholesterol_mg": "number",
+    "sodium_mg": "number",
+    "total_carb_g": "number",
+    "fiber_g": "number",
+    "total_sugars_g": "number",
+    "added_sugars_g": "number or null",
+    "protein_g": "number",
+    "vitamin_d_mcg": "number or null",
+    "calcium_mg": "number or null",
+    "iron_mg": "number or null",
+    "potassium_mg": "number or null"
+}
+
+EXTRACTION RULES:
+- Be precise with decimals (e.g., 1.5g not 2g)
+- Look for: "Grasas/Fat", "Sodio/Sodium", "Carbohidratos/Carbohydrate"
+- Spanish "Azúcares añadidos" = Added Sugars
+- Portuguese "Açúcares adicionados" = Added Sugars
+- If label shows "<1g", use "0.5"
+
+Extract now:"""
+
+
+def generate_fda_compliant_label_html(nutrition_data, percent_dv):
+    """Generate pixel-perfect FDA-compliant label"""
+    
+    def get_val(key, default='0'):
+        val = nutrition_data.get(key, default)
+        return val if val not in [None, '', 'null'] else default
+    
+    def get_dv(key):
+        return percent_dv.get(key, 0)
+    
+    def format_float(val):
+        try:
+            f = float(val)
+            if f == 0:
+                return "0"
+            elif f < 1:
+                return f"{f:.1f}".rstrip('0').rstrip('.')
+            else:
+                return f"{f:.0f}" if f == int(f) else f"{f:.1f}".rstrip('0').rstrip('.')
+        except:
+            return "0"
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FDA Nutrition Facts - {nutrition_data.get('product_name', 'Product')}</title>
+    <style>
+        @media print {{
+            @page {{ margin: 0; }}
+            body {{ margin: 5mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+            .no-print {{ display: none; }}
+        }}
+        
+        body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: #f5f5f5; padding: 20px; }}
+        
+        .nutrition-label {{
+            width: 3.5in;
+            border: 1pt solid #000;
+            padding: 0.05in 0.08in;
+            background: white;
+            margin: 0 auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        
+        .title {{ font-size: 30pt; font-weight: 900; line-height: 1; margin: 0 0 1pt 0; }}
+        .bar-thick {{ height: 10pt; background: #000; margin: 2pt 0; border: none; }}
+        .bar-medium {{ height: 5pt; background: #000; margin: 1pt 0; border: none; }}
+        .bar-thin {{ height: 0.5pt; background: #000; margin: 1pt 0; border: none; }}
+        
+        .servings-text {{ font-size: 9pt; line-height: 1.2; margin: 2pt 0; }}
+        .serving-size {{ font-weight: 700; }}
+        
+        .calories-row {{ display: flex; justify-content: space-between; align-items: baseline; padding: 2pt 0; }}
+        .calories-label {{ font-size: 10pt; font-weight: 700; }}
+        .calories-value {{ font-size: 36pt; font-weight: 900; line-height: 1; }}
+        
+        .dv-header {{ text-align: right; font-size: 7pt; font-weight: 700; margin: 1pt 0; }}
+        
+        .nutrient-row {{ display: flex; justify-content: space-between; font-size: 8.5pt; padding: 1pt 0; }}
+        .nutrient-name {{ font-weight: 700; }}
+        .nutrient-indent-1 {{ padding-left: 8pt; }}
+        .nutrient-indent-2 {{ padding-left: 16pt; }}
+        .nutrient-label {{ flex: 1; }}
+        .nutrient-dv {{ font-weight: 700; min-width: 35pt; text-align: right; }}
+        
+        .footnote {{ font-size: 6.5pt; line-height: 1.3; margin: 3pt 0 0 0; }}
+        
+        .instructions {{ background: white; padding: 20px; margin: 20px auto; max-width: 600px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .instructions h2 {{ color: #2c5282; margin-bottom: 15px; }}
+        .instructions ol {{ margin-left: 20px; line-height: 1.8; }}
+    </style>
+</head>
+<body>
+    <div class="nutrition-label">
+        <div class="title">Nutrition Facts</div>
+        <hr class="bar-thin">
+        
+        <div class="servings-text">
+            <span class="serving-size">Servings per container</span>
+            <span>&nbsp;&nbsp;{get_val('servings_per_container', 'About X')}</span>
+        </div>
+        
+        <div class="servings-text">
+            <span class="serving-size">Serving size</span>
+            <span>&nbsp;&nbsp;{get_val('serving_size_us', '1 serving')}</span>
+        </div>
+        
+        <hr class="bar-thick">
+        
+        <div class="servings-text" style="margin: 1pt 0;">
+            <span style="font-size: 7pt;">Amount per serving</span>
+        </div>
+        
+        <div class="calories-row">
+            <span class="calories-label">Calories</span>
+            <span class="calories-value">{get_val('calories')}</span>
+        </div>
+        
+        <hr class="bar-medium">
+        <div class="dv-header">% Daily Value*</div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">
+                <span class="nutrient-name">Total Fat</span>
+                <span> {format_float(get_val('total_fat_g'))}g</span>
+            </div>
+            <div class="nutrient-dv">{get_dv('total_fat')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row nutrient-indent-1">
+            <div class="nutrient-label">Saturated Fat {format_float(get_val('saturated_fat_g'))}g</div>
+            <div class="nutrient-dv">{get_dv('saturated_fat')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row nutrient-indent-1">
+            <div class="nutrient-label"><em>Trans</em> Fat {format_float(get_val('trans_fat_g'))}g</div>
+            <div class="nutrient-dv"></div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">
+                <span class="nutrient-name">Cholesterol</span>
+                <span> {format_float(get_val('cholesterol_mg'))}mg</span>
+            </div>
+            <div class="nutrient-dv">{get_dv('cholesterol')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">
+                <span class="nutrient-name">Sodium</span>
+                <span> {format_float(get_val('sodium_mg'))}mg</span>
+            </div>
+            <div class="nutrient-dv">{get_dv('sodium')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">
+                <span class="nutrient-name">Total Carbohydrate</span>
+                <span> {format_float(get_val('total_carb_g'))}g</span>
+            </div>
+            <div class="nutrient-dv">{get_dv('total_carb')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row nutrient-indent-1">
+            <div class="nutrient-label">Dietary Fiber {format_float(get_val('fiber_g'))}g</div>
+            <div class="nutrient-dv">{get_dv('fiber')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row nutrient-indent-1">
+            <div class="nutrient-label">Total Sugars {format_float(get_val('total_sugars_g'))}g</div>
+            <div class="nutrient-dv"></div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row nutrient-indent-2">
+            <div class="nutrient-label">Includes {format_float(get_val('added_sugars_g'))}g Added Sugars</div>
+            <div class="nutrient-dv">{get_dv('added_sugars')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">
+                <span class="nutrient-name">Protein</span>
+                <span> {format_float(get_val('protein_g'))}g</span>
+            </div>
+            <div class="nutrient-dv"></div>
+        </div>
+        
+        <hr class="bar-thick">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">Vitamin D {format_float(get_val('vitamin_d_mcg'))}mcg</div>
+            <div class="nutrient-dv">{get_dv('vitamin_d')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">Calcium {format_float(get_val('calcium_mg'))}mg</div>
+            <div class="nutrient-dv">{get_dv('calcium')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">Iron {format_float(get_val('iron_mg'))}mg</div>
+            <div class="nutrient-dv">{get_dv('iron')}%</div>
+        </div>
+        <hr class="bar-thin">
+        
+        <div class="nutrient-row">
+            <div class="nutrient-label">Potassium {format_float(get_val('potassium_mg'))}mg</div>
+            <div class="nutrient-dv">{get_dv('potassium')}%</div>
+        </div>
+        
+        <hr class="bar-thick">
+        
+        <div class="footnote">
+            * The % Daily Value (DV) tells you how much a nutrient in 
+            a serving of food contributes to a daily diet. 2,000 calories 
+            a day is used for general nutrition advice.
+        </div>
+    </div>
+    
+    <div class="instructions no-print">
+        <h2>📋 How to Use This FDA-Compliant Label</h2>
+        <ol>
+            <li>Press <kbd>Ctrl+P</kbd> (Windows) or <kbd>Cmd+P</kbd> (Mac)</li>
+            <li>Select "Save as PDF"</li>
+            <li>Set margins to "None"</li>
+            <li>Save and send to your packaging designer</li>
+        </ol>
+        <p style="color: #666; margin-top: 20px; text-align: center;">
+            <em>FDA-compliant label per 21 CFR 101.9 • Generated by LATAM → USA Export Tool</em>
+        </p>
+    </div>
+</body>
+</html>"""
+    
+    return html
+
+
+# ============================================================================
+# STREAMLIT APP BEGINS HERE
+# ============================================================================
 
 # Page configuration
 st.set_page_config(
@@ -21,7 +506,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS with LATAM-friendly colors
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -101,312 +586,21 @@ translations = {
 
 t = translations[language]
 
-# Helper function to calculate %DV (defined at module level)
+# Helper function (backwards compatibility)
 def calculate_dv(nutrient_type, amount):
     """Calculate % Daily Value based on FDA standards"""
+    validator = FDALabelValidator()
     try:
         amount_num = float(amount) if amount else 0
+        return validator.calculate_percent_dv(nutrient_type, amount_num)
     except (ValueError, TypeError):
         return 0
-    
-    dv_values = {
-        'fat': 78, 'sat_fat': 20, 'cholesterol': 300, 'sodium': 2300,
-        'carbs': 275, 'fiber': 28, 'added_sugars': 50, 'vitamin_d': 20,
-        'calcium': 1300, 'iron': 18, 'potassium': 4700
-    }
-    
-    if nutrient_type in dv_values and dv_values[nutrient_type] > 0:
-        return round((amount_num / dv_values[nutrient_type]) * 100)
-    return 0
-
-# Helper function to generate FDA label HTML
-def generate_fda_label_html(nutrition_data):
-    """Generate print-ready FDA label as HTML"""
-    
-    # Calculate all %DVs
-    dvs = {
-        'fat': calculate_dv('fat', nutrition_data.get('total_fat_g', 0)),
-        'sat_fat': calculate_dv('sat_fat', nutrition_data.get('saturated_fat_g', 0)),
-        'cholesterol': calculate_dv('cholesterol', nutrition_data.get('cholesterol_mg', 0)),
-        'sodium': calculate_dv('sodium', nutrition_data.get('sodium_mg', 0)),
-        'carbs': calculate_dv('carbs', nutrition_data.get('total_carb_g', 0)),
-        'fiber': calculate_dv('fiber', nutrition_data.get('fiber_g', 0)),
-        'added_sugars': calculate_dv('added_sugars', nutrition_data.get('added_sugars_g', 0)),
-        'vitamin_d': calculate_dv('vitamin_d', nutrition_data.get('vitamin_d_mcg', 0)),
-        'calcium': calculate_dv('calcium', nutrition_data.get('calcium_mg', 0)),
-        'iron': calculate_dv('iron', nutrition_data.get('iron_mg', 0)),
-        'potassium': calculate_dv('potassium', nutrition_data.get('potassium_mg', 0))
-    }
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>FDA Nutrition Facts - {nutrition_data.get('product_name', 'Product')}</title>
-        <style>
-            @media print {{
-                @page {{ margin: 0; }}
-                body {{ margin: 0.5cm; }}
-            }}
-            
-            body {{
-                font-family: Helvetica, Arial, sans-serif;
-                background: #f5f5f5;
-                padding: 20px;
-            }}
-            
-            .nutrition-label {{
-                width: 3.5in;
-                border: 1px solid black;
-                padding: 0.1in;
-                background: white;
-                box-sizing: border-box;
-                margin: 0 auto;
-            }}
-            
-            .title {{
-                font-size: 18pt;
-                font-weight: bold;
-                line-height: 1.2;
-                margin: 0 0 2px 0;
-            }}
-            
-            .thick-bar {{
-                border-top: 10pt solid black;
-                margin: 2px 0;
-            }}
-            
-            .medium-bar {{
-                border-top: 5pt solid black;
-                margin: 2px 0;
-            }}
-            
-            .thin-bar {{
-                border-top: 0.5pt solid black;
-                margin: 1px 0;
-            }}
-            
-            .serving-info {{
-                font-size: 8pt;
-                margin: 2px 0;
-                display: flex;
-                justify-content: space-between;
-            }}
-            
-            .serving-size {{
-                font-weight: bold;
-            }}
-            
-            .calories-section {{
-                font-size: 8pt;
-                margin: 4px 0;
-                display: flex;
-                justify-content: space-between;
-                align-items: baseline;
-            }}
-            
-            .calories-label {{
-                font-weight: bold;
-            }}
-            
-            .calories-value {{
-                font-size: 16pt;
-                font-weight: bold;
-            }}
-            
-            .dv-header {{
-                font-size: 7pt;
-                font-weight: bold;
-                text-align: right;
-                margin: 2px 0;
-            }}
-            
-            .nutrient-row {{
-                font-size: 8pt;
-                display: flex;
-                justify-content: space-between;
-                margin: 1px 0;
-            }}
-            
-            .nutrient-name {{
-                font-weight: bold;
-            }}
-            
-            .indent-1 {{
-                padding-left: 10px;
-            }}
-            
-            .indent-2 {{
-                padding-left: 20px;
-            }}
-            
-            .dv-value {{
-                font-weight: bold;
-                min-width: 40px;
-                text-align: right;
-            }}
-            
-            .footnote {{
-                font-size: 6pt;
-                margin-top: 4px;
-                line-height: 1.3;
-            }}
-            
-            .instructions {{
-                max-width: 600px;
-                margin: 20px auto;
-                padding: 20px;
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="nutrition-label">
-            <div class="title">Nutrition Facts</div>
-            <div class="thin-bar"></div>
-            
-            <div class="serving-info">
-                <span class="serving-size">Serving size</span>
-                <span>{nutrition_data.get('serving_size_us', '1 serving')}</span>
-            </div>
-            <div class="serving-info">
-                <span>Servings per container</span>
-                <span>{nutrition_data.get('servings_per_container', 'About X')}</span>
-            </div>
-            
-            <div class="thick-bar"></div>
-            
-            <div class="calories-section">
-                <span class="calories-label">Calories</span>
-                <span class="calories-value">{nutrition_data.get('calories', '0')}</span>
-            </div>
-            
-            <div class="medium-bar"></div>
-            
-            <div class="dv-header">% Daily Value*</div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span><span class="nutrient-name">Total Fat</span> {nutrition_data.get('total_fat_g', '0')}g</span>
-                <span class="dv-value">{dvs['fat']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row indent-1">
-                <span>Saturated Fat {nutrition_data.get('saturated_fat_g', '0')}g</span>
-                <span class="dv-value">{dvs['sat_fat']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row indent-1">
-                <span><em>Trans</em> Fat {nutrition_data.get('trans_fat_g', '0')}g</span>
-                <span class="dv-value"></span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span><span class="nutrient-name">Cholesterol</span> {nutrition_data.get('cholesterol_mg', '0')}mg</span>
-                <span class="dv-value">{dvs['cholesterol']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span><span class="nutrient-name">Sodium</span> {nutrition_data.get('sodium_mg', '0')}mg</span>
-                <span class="dv-value">{dvs['sodium']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span><span class="nutrient-name">Total Carbohydrate</span> {nutrition_data.get('total_carb_g', '0')}g</span>
-                <span class="dv-value">{dvs['carbs']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row indent-1">
-                <span>Dietary Fiber {nutrition_data.get('fiber_g', '0')}g</span>
-                <span class="dv-value">{dvs['fiber']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row indent-1">
-                <span>Total Sugars {nutrition_data.get('total_sugars_g', '0')}g</span>
-                <span class="dv-value"></span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row indent-2">
-                <span>Includes {nutrition_data.get('added_sugars_g', '0')}g Added Sugars</span>
-                <span class="dv-value">{dvs['added_sugars']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span><span class="nutrient-name">Protein</span> {nutrition_data.get('protein_g', '0')}g</span>
-                <span class="dv-value"></span>
-            </div>
-            
-            <div class="thick-bar"></div>
-            
-            <div class="nutrient-row">
-                <span>Vitamin D {nutrition_data.get('vitamin_d_mcg') or '0'}mcg</span>
-                <span class="dv-value">{dvs['vitamin_d']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span>Calcium {nutrition_data.get('calcium_mg') or '0'}mg</span>
-                <span class="dv-value">{dvs['calcium']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span>Iron {nutrition_data.get('iron_mg') or '0'}mg</span>
-                <span class="dv-value">{dvs['iron']}%</span>
-            </div>
-            <div class="thin-bar"></div>
-            
-            <div class="nutrient-row">
-                <span>Potassium {nutrition_data.get('potassium_mg') or '0'}mg</span>
-                <span class="dv-value">{dvs['potassium']}%</span>
-            </div>
-            
-            <div class="thick-bar"></div>
-            
-            <div class="footnote">
-                * The % Daily Value (DV) tells you how much a nutrient in a serving 
-                of food contributes to a daily diet. 2,000 calories a day is used 
-                for general nutrition advice.
-            </div>
-        </div>
-        
-        <div class="instructions">
-            <h2 style="margin-top: 0;">📋 How to Use This Label</h2>
-            <ol style="line-height: 1.8;">
-                <li><strong>Print to PDF:</strong> Press Ctrl+P (Windows) or Cmd+P (Mac)</li>
-                <li><strong>Set margins to "None"</strong> for best results</li>
-                <li><strong>Save as PDF</strong></li>
-                <li><strong>Send to your graphic designer</strong> to integrate with your packaging</li>
-                <li><strong>Or print directly</strong> and apply to products</li>
-            </ol>
-            <p style="color: #666; margin-top: 20px;">
-                <em>This label meets FDA requirements per 21 CFR 101.9. 
-                Generated by LATAM → USA Export Compliance Tool.</em>
-            </p>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return html
 
 # Title
 st.markdown(f'<p class="main-header">{t["title"]}</p>', unsafe_allow_html=True)
 st.markdown(f'<p class="sub-header">{t["subtitle"]}</p>', unsafe_allow_html=True)
 
-# Value proposition banner
+# Value proposition
 st.markdown("""
 <div class="savings-badge">
     <h3 style="margin:0;">⚡ Fast, Affordable, Accurate</h3>
@@ -414,7 +608,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Operation mode selector (MOVED HERE - before it's used)
+# Operation mode selector
 operation_mode = st.radio(
     "🔧 Select Tool Mode:",
     ["🔍 Audit Existing Label", "🔄 Convert LATAM Label to FDA Format"],
@@ -436,7 +630,6 @@ except (KeyError, FileNotFoundError):
 with st.sidebar:
     st.header(f"⚙️ {t['config']}")
     
-    # API Status
     if api_key_loaded:
         st.success("✅ System: Active")
     else:
@@ -444,7 +637,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Country selector - focused on top 4 LATAM markets
     origin_country = st.selectbox(
         "🏭 Your Country / Su País",
         ["🇲🇽 Mexico", "🇨🇴 Colombia", "🇨🇱 Chile", "🇧🇷 Brazil"],
@@ -453,7 +645,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Model settings
     st.subheader("🤖 Analysis Settings")
     
     model_choice = st.selectbox(
@@ -469,7 +660,6 @@ with st.sidebar:
         help="How strict should the compliance check be?"
     )
     
-    # Map to temperature
     temp_map = {
         "Lenient (Screening)": 0.2,
         "Balanced (Recommended)": 0.1,
@@ -479,7 +669,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Check rules file
     rules_file = Path("nutrition_rules.txt")
     if rules_file.exists():
         rules_content = rules_file.read_text()
@@ -491,7 +680,7 @@ with st.sidebar:
         rules_content = None
     
     st.markdown("---")
-    st.caption("🌎 LATAM Export Edition v1.0")
+    st.caption("🌎 LATAM Export Edition v2.0")
 
 # Main content
 col1, col2 = st.columns([1, 1], gap="large")
@@ -528,7 +717,6 @@ with col1:
 with col2:
     st.subheader(f"🔍 {t['results']}")
     
-    # Pre-flight checks
     checks_passed = True
     
     if not uploaded_file:
@@ -577,7 +765,10 @@ with col_btn2:
 if 'analysis_history' not in st.session_state:
     st.session_state.analysis_history = []
 
-# CONVERTER ENGINE
+# ============================================================================
+# ENHANCED CONVERTER ENGINE
+# ============================================================================
+
 if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
     if not checks_passed:
         st.error("❌ Cannot proceed. Please resolve issues above.")
@@ -586,7 +777,7 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
         status_text = st.empty()
         
         try:
-            # STEP 1: Extract nutritional data
+            # STEP 1: Extract data
             status_text.text("📊 Step 1/4: Extracting data..." if language == "English" else "📊 Paso 1/4: Extrayendo datos...")
             progress_bar.progress(20)
             
@@ -622,22 +813,21 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             data_text = data_text.replace('```json', '').replace('```', '').strip()
             nutrition_data = json.loads(data_text)
             
-            # STEP 2: Validate and correct data
+            # STEP 2: Validate and correct
             status_text.text("🔍 Step 2/4: Validating FDA compliance..." if language == "English" else "🔍 Paso 2/4: Validando cumplimiento FDA...")
             progress_bar.progress(55)
             
             converter = EnhancedFDAConverter()
             corrected_data = converter.extract_and_validate(nutrition_data)
             
-            # STEP 3: Convert serving size to US format
+            # STEP 3: Convert serving size
             status_text.text("🔄 Step 3/4: Converting to US format..." if language == "English" else "🔄 Paso 3/4: Convirtiendo a formato USA...")
             progress_bar.progress(70)
             
-            # STEP 4: Generate FDA-format label
+            # STEP 4: Generate FDA label
             status_text.text("🎨 Step 4/4: Generating FDA label..." if language == "English" else "🎨 Paso 4/4: Generando etiqueta FDA...")
             progress_bar.progress(85)
             
-            # Generate the HTML label using corrected data
             fda_label_html = generate_fda_compliant_label_html(
                 corrected_data, 
                 corrected_data.get('percent_dv', {})
@@ -649,7 +839,6 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             # DISPLAY RESULTS
             st.markdown("---")
             
-            # Show validation status
             validation = corrected_data.get('validation_report', {})
             
             if validation.get('is_compliant', True):
@@ -657,7 +846,7 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             else:
                 st.warning("⚠️ " + ("Label generated with warnings" if language == "English" else "Etiqueta generada con advertencias"))
             
-            # Display any errors or warnings
+            # Display errors/warnings
             if validation.get('errors'):
                 with st.expander("❌ " + ("Critical Errors" if language == "English" else "Errores Críticos"), expanded=True):
                     for error in validation['errors']:
@@ -677,10 +866,9 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             
             with col_compare2:
                 st.subheader("📋 " + ("FDA-Format Label" if language == "English" else "Etiqueta Formato FDA"))
-                # Show HTML preview
                 st.components.v1.html(fda_label_html, height=850, scrolling=True)
             
-            # Show extracted and corrected data
+            # Show data
             with st.expander("🔍 " + ("View Extracted Data" if language == "English" else "Ver Datos Extraídos")):
                 col1, col2 = st.columns(2)
                 with col1:
@@ -715,18 +903,15 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             col_dl1, col_dl2, col_dl3 = st.columns(3)
             
             with col_dl1:
-                # HTML file
                 st.download_button(
                     "🌐 " + ("Download HTML Label" if language == "English" else "Descargar Etiqueta HTML"),
                     data=fda_label_html,
                     file_name=f"FDA_Label_{corrected_data.get('product_name', 'product').replace(' ', '_')}.html",
                     mime="text/html",
-                    use_container_width=True,
-                    help="Download print-ready HTML label"
+                    use_container_width=True
                 )
             
             with col_dl2:
-                # JSON data
                 st.download_button(
                     "📊 " + ("Download Data (JSON)" if language == "English" else "Descargar Datos (JSON)"),
                     data=json.dumps(corrected_data, indent=2, ensure_ascii=False),
@@ -736,7 +921,6 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                 )
             
             with col_dl3:
-                # Validation report
                 report_text = f"""FDA COMPLIANCE REPORT
 {'='*50}
 
@@ -751,13 +935,6 @@ ERRORS:
 WARNINGS:
 {chr(10).join('- ' + w for w in validation.get('warnings', [])) if validation.get('warnings') else 'None'}
 
-DATA CORRECTIONS APPLIED:
-- FDA rounding rules
-- Serving size conversion
-- %DV calculations
-- Nutrient order standardization
-
-{'='*50}
 Generated by LATAM → USA Export Compliance Tool
 """
                 st.download_button(
@@ -773,21 +950,17 @@ Generated by LATAM → USA Export Compliance Tool
             st.info("""
             **📝 Next Steps:**
             1. ✅ Download the HTML label above
-            2. 🖨️ Open in your browser and print to PDF (Ctrl+P / Cmd+P)
+            2. 🖨️ Open in browser and print to PDF (Ctrl+P / Cmd+P)
             3. 📧 Send to your packaging designer/printer
-            4. 🔍 Optional: Run the audit tool on the final design
+            4. 🔍 Optional: Run audit tool on final design
             5. 🚀 Ready for US market!
-            
-            **The label is FDA-compliant and print-ready at 3.5 inches width.**
             """ if language == "English" else """
             **📝 Próximos Pasos:**
             1. ✅ Descargue la etiqueta HTML arriba
-            2. 🖨️ Abra en su navegador e imprima a PDF (Ctrl+P / Cmd+P)
-            3. 📧 Envíe a su diseñador/imprenta de empaques
-            4. 🔍 Opcional: Ejecute la herramienta de auditoría en el diseño final
-            5. 🚀 ¡Listo para el mercado USA!
-            
-            **La etiqueta cumple con FDA y está lista para imprimir a 3.5 pulgadas de ancho.**
+            2. 🖨️ Abra en navegador e imprima a PDF (Ctrl+P / Cmd+P)
+            3. 📧 Envíe a su diseñador/imprenta
+            4. 🔍 Opcional: Ejecute auditoría en diseño final
+            5. 🚀 ¡Listo para mercado USA!
             """)
             
             progress_bar.empty()
@@ -797,9 +970,8 @@ Generated by LATAM → USA Export Compliance Tool
             progress_bar.empty()
             status_text.empty()
             st.error("❌ " + ("Could not parse nutrition data." if language == "English" else "No se pudo analizar los datos."))
-            with st.expander("🔍 " + ("Debug Info" if language == "English" else "Info de Depuración")):
+            with st.expander("🔍 Debug Info"):
                 st.code(data_text)
-                st.info("Try uploading a clearer image or contact support.")
                 
         except Exception as e:
             progress_bar.empty()
@@ -808,284 +980,11 @@ Generated by LATAM → USA Export Compliance Tool
             with st.expander("🔍 Error Details"):
                 import traceback
                 st.code(traceback.format_exc())
-    if not checks_passed:
-        st.error("❌ Cannot proceed. Please resolve issues above.")
-    else:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        try:
-            # STEP 1: Extract nutritional data
-            status_text.text("📊 Step 1/3: Extracting data from your label..." if language == "English" else "📊 Paso 1/3: Extrayendo datos de su etiqueta...")
-            progress_bar.progress(20)
-            
-            image_bytes = uploaded_file.getvalue()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            image_type = uploaded_file.type
-            image_data_url = f"data:{image_type};base64,{base64_image}"
-            
-            openai.api_key = api_key
-            
-            extraction_prompt = """You are a nutrition label data extraction expert. Extract ALL nutritional information from this food label.
 
-TASK: Read this label (may be in Spanish or Portuguese) and extract data as JSON.
+# ============================================================================
+# AUDIT ENGINE (keeping your original functionality)
+# ============================================================================
 
-REQUIRED JSON FORMAT (return ONLY valid JSON, no other text):
-{
-    "product_name": "exact product name from label",
-    "serving_size_original": "serving size as shown on label",
-    "serving_size_metric": "just the metric part (e.g., 30g or 240mL)",
-    "servings_per_container": "number as string",
-    "calories": "number as string",
-    "total_fat_g": "number",
-    "saturated_fat_g": "number",
-    "trans_fat_g": "number",
-    "cholesterol_mg": "number",
-    "sodium_mg": "number",
-    "total_carb_g": "number",
-    "fiber_g": "number",
-    "total_sugars_g": "number",
-    "added_sugars_g": "number or 0 if not specified",
-    "protein_g": "number",
-    "vitamin_d_mcg": "number or null if not present",
-    "calcium_mg": "number or null if not present",
-    "iron_mg": "number or null if not present",
-    "potassium_mg": "number or null if not present"
-}
-
-EXTRACTION RULES:
-- Extract exact numerical values
-- Convert all text to English nutrient names
-- If a nutrient is not on the label, use null
-- For Added Sugars, use 0 if not specified (many LATAM labels don't have this)
-- Be precise with numbers (preserve decimals if shown)"""
-
-            extraction_response = openai.ChatCompletion.create(
-                model=model_choice,
-                messages=[
-                    {"role": "system", "content": extraction_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Extract all nutrition data from this label as JSON"},
-                            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "high"}}
-                        ]
-                    }
-                ],
-                max_tokens=1500,
-                temperature=0.0
-            )
-            
-            status_text.text("✅ Data extracted!" if language == "English" else "✅ ¡Datos extraídos!")
-            progress_bar.progress(40)
-            
-            # Parse JSON
-            data_text = extraction_response['choices'][0]['message']['content']
-            data_text = data_text.replace('```json', '').replace('```', '').strip()
-            nutrition_data = json.loads(data_text)
-            
-            # STEP 2: Convert serving size to US format
-            status_text.text("🔄 Step 2/3: Converting to US format..." if language == "English" else "🔄 Paso 2/3: Convirtiendo a formato USA...")
-            progress_bar.progress(60)
-            
-            # Smart serving size conversion
-            serving_metric = nutrition_data['serving_size_metric'].strip()
-            
-            # Common conversions
-            us_conversions = {
-                '30g': '2 tbsp (30g)', '15g': '1 tbsp (15g)', '240mL': '1 cup (240mL)',
-                '250mL': '1 cup (250mL)', '28g': '1 oz (28g)', '100g': '3.5 oz (100g)',
-                '200g': '7 oz (200g)', '150g': '5.3 oz (150g)', '50g': '1.8 oz (50g)',
-                '120mL': '1/2 cup (120mL)', '180mL': '3/4 cup (180mL)',
-                '15mL': '1 tbsp (15mL)', '5mL': '1 tsp (5mL)'
-            }
-            
-            us_serving = us_conversions.get(serving_metric, f"1 serving ({serving_metric})")
-            
-            # STEP 3: Generate FDA-format label as text
-            status_text.text("🎨 Step 3/3: Generating FDA label..." if language == "English" else "🎨 Paso 3/3: Generando etiqueta FDA...")
-            progress_bar.progress(80)
-            
-            # Calculate all %DVs
-            dvs = {
-                'fat': calculate_dv('fat', nutrition_data.get('total_fat_g', 0)),
-                'sat_fat': calculate_dv('sat_fat', nutrition_data.get('saturated_fat_g', 0)),
-                'cholesterol': calculate_dv('cholesterol', nutrition_data.get('cholesterol_mg', 0)),
-                'sodium': calculate_dv('sodium', nutrition_data.get('sodium_mg', 0)),
-                'carbs': calculate_dv('carbs', nutrition_data.get('total_carb_g', 0)),
-                'fiber': calculate_dv('fiber', nutrition_data.get('fiber_g', 0)),
-                'added_sugars': calculate_dv('added_sugars', nutrition_data.get('added_sugars_g', 0)),
-                'vitamin_d': calculate_dv('vitamin_d', nutrition_data.get('vitamin_d_mcg', 0)),
-                'calcium': calculate_dv('calcium', nutrition_data.get('calcium_mg', 0)),
-                'iron': calculate_dv('iron', nutrition_data.get('iron_mg', 0)),
-                'potassium': calculate_dv('potassium', nutrition_data.get('potassium_mg', 0))
-            }
-            
-            # Generate FDA-format label text
-            fda_label_text = f"""Nutrition Facts
-═══════════════════════════════════════════════
-Serving size        {us_serving}
-Servings per container    {nutrition_data.get('servings_per_container', 'About X')}
-═══════════════════════════════════════════════
-
-Calories                                    {nutrition_data.get('calories', '0')}
-───────────────────────────────────────────────
-                                    % Daily Value*
-Total Fat {nutrition_data.get('total_fat_g', '0')}g                              {dvs['fat']}%
-    Saturated Fat {nutrition_data.get('saturated_fat_g', '0')}g                      {dvs['sat_fat']}%
-    Trans Fat {nutrition_data.get('trans_fat_g', '0')}g
-Cholesterol {nutrition_data.get('cholesterol_mg', '0')}mg                          {dvs['cholesterol']}%
-Sodium {nutrition_data.get('sodium_mg', '0')}mg                                 {dvs['sodium']}%
-Total Carbohydrate {nutrition_data.get('total_carb_g', '0')}g                   {dvs['carbs']}%
-    Dietary Fiber {nutrition_data.get('fiber_g', '0')}g                          {dvs['fiber']}%
-    Total Sugars {nutrition_data.get('total_sugars_g', '0')}g
-        Includes {nutrition_data.get('added_sugars_g', '0')}g Added Sugars    {dvs['added_sugars']}%
-Protein {nutrition_data.get('protein_g', '0')}g
-
-Vitamin D {nutrition_data.get('vitamin_d_mcg', '0')}mcg                         {dvs['vitamin_d']}%
-Calcium {nutrition_data.get('calcium_mg', '0')}mg                            {dvs['calcium']}%
-Iron {nutrition_data.get('iron_mg', '0')}mg                                  {dvs['iron']}%
-Potassium {nutrition_data.get('potassium_mg', '0')}mg                        {dvs['potassium']}%
-───────────────────────────────────────────────
-* The % Daily Value (DV) tells you how much a nutrient in
-  a serving of food contributes to a daily diet. 2,000
-  calories a day is used for general nutrition advice."""
-            
-            progress_bar.progress(100)
-            status_text.text("✅ Conversion complete!" if language == "English" else "✅ ¡Conversión completa!")
-            
-            # Display results
-            st.markdown("---")
-            st.success("✅ " + ("FDA Label Generated Successfully!" if language == "English" else "¡Etiqueta FDA Generada Exitosamente!"))
-            
-            # Show original vs converted
-            col_compare1, col_compare2 = st.columns(2)
-            
-            with col_compare1:
-                st.subheader("📋 Original Label" if language == "English" else "📋 Etiqueta Original")
-                st.image(uploaded_file, use_column_width=True)
-            
-            with col_compare2:
-                st.subheader("📋 FDA-Format Label" if language == "English" else "📋 Etiqueta Formato FDA")
-                st.code(fda_label_text, language="text")
-            
-            # Show extracted data
-            with st.expander("🔍 " + ("View Extracted Data" if language == "English" else "Ver Datos Extraídos")):
-                st.json(nutrition_data)
-            
-            # STEP 4: Generate HTML Label
-            st.markdown("---")
-            st.subheader("🎨 " + ("Visual FDA Label (Print-Ready)" if language == "English" else "Etiqueta FDA Visual (Lista para Imprimir)"))
-            
-            # Generate the HTML label
-            fda_label_html = generate_fda_label_html(nutrition_data)
-            
-            # Display HTML preview
-            st.components.v1.html(fda_label_html, height=850, scrolling=True)
-            
-            st.success("""
-            ✅ **Your FDA-compliant label is ready!**
-            
-            **How to use:**
-            1. Download the HTML file below
-            2. Open it in Chrome or Firefox
-            3. Press Ctrl+P (Windows) or Cmd+P (Mac) to print
-            4. Select "Save as PDF"
-            5. Send the PDF to your packaging printer!
-            
-            The label meets all FDA requirements and is ready for production.
-            """ if language == "English" else """
-            ✅ **¡Su etiqueta compatible con FDA está lista!**
-            
-            **Cómo usar:**
-            1. Descargue el archivo HTML a continuación
-            2. Ábralo en Chrome o Firefox
-            3. Presione Ctrl+P (Windows) o Cmd+P (Mac) para imprimir
-            4. Seleccione "Guardar como PDF"
-            5. ¡Envíe el PDF a su imprenta de empaques!
-            
-            La etiqueta cumple con todos los requisitos de FDA y está lista para producción.
-            """)
-            
-            # Key conversions made
-            st.markdown("---")
-            st.subheader("🔄 " + ("Conversions Applied" if language == "English" else "Conversiones Aplicadas"))
-            
-            conversion_notes = []
-            if serving_metric != us_serving:
-                conversion_notes.append(f"✅ Serving size: `{serving_metric}` → `{us_serving}`")
-            
-            if nutrition_data.get('added_sugars_g') == '0':
-                conversion_notes.append("✅ Added 'Added Sugars' line (0g) - required by FDA even if not on original")
-            
-            conversion_notes.append(f"✅ Calculated all %DV values per FDA standards")
-            conversion_notes.append(f"✅ Formatted in FDA-required sequence")
-            conversion_notes.append(f"✅ Added FDA footer text")
-            
-            for note in conversion_notes:
-                st.markdown(note)
-            
-            # Download options
-            st.markdown("---")
-            st.subheader("📥 " + ("Download Options" if language == "English" else "Opciones de Descarga"))
-            
-            col_dl1, col_dl2 = st.columns(2)
-            
-            with col_dl1:
-                # Text version
-                st.download_button(
-                    "📄 " + ("Download as Text File" if language == "English" else "Descargar como Texto"),
-                    data=fda_label_text,
-                    file_name=f"FDA_Label_{nutrition_data.get('product_name', 'product').replace(' ', '_')}.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-            
-            with col_dl2:
-                # JSON data
-                st.download_button(
-                    "📊 " + ("Download as JSON" if language == "English" else "Descargar como JSON"),
-                    data=json.dumps(nutrition_data, indent=2, ensure_ascii=False),
-                    file_name=f"FDA_Data_{nutrition_data.get('product_name', 'product').replace(' ', '_')}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
-            
-            # Next steps guidance
-            st.markdown("---")
-            st.info("""
-            **📝 Next Steps:**
-            1. ✅ Download the FDA-format label text above
-            2. 📋 Copy this text to your graphic designer
-            3. 🎨 Have them create the final label design with proper fonts/layout
-            4. 🔍 Upload the final design back here to audit it
-            5. 🚀 Print and apply to your products for US export!
-            """ if language == "English" else """
-            **📝 Próximos Pasos:**
-            1. ✅ Descargue el texto de la etiqueta FDA arriba
-            2. 📋 Copie este texto a su diseñador gráfico
-            3. 🎨 Que creen el diseño final con las fuentes/formato adecuados
-            4. 🔍 Suba el diseño final aquí para auditarlo
-            5. 🚀 ¡Imprima y aplique a sus productos para exportar a USA!
-            """)
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-        except json.JSONDecodeError as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.error("❌ " + ("Could not parse nutrition data. The AI may not have returned valid JSON." if language == "English" else "No se pudo analizar los datos. La IA puede no haber devuelto JSON válido."))
-            with st.expander("🔍 " + ("Debug Info" if language == "English" else "Info de Depuración")):
-                st.code(data_text)
-                st.info("Try uploading a clearer image or contact support.")
-                
-        except Exception as e:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"❌ Conversion failed: {str(e)}")
-
-# AUDIT ENGINE (original functionality)
 elif operation_mode == "🔍 Audit Existing Label" and action_button:
     if not checks_passed:
         st.error("❌ Cannot run analysis. Please resolve issues above.")
@@ -1094,7 +993,6 @@ elif operation_mode == "🔍 Audit Existing Label" and action_button:
         status_text = st.empty()
         
         try:
-            # Step 1: Process image
             status_text.text("📸 Processing image..." if language == "English" else "📸 Procesando imagen...")
             progress_bar.progress(20)
             
@@ -1102,13 +1000,11 @@ elif operation_mode == "🔍 Audit Existing Label" and action_button:
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             image_type = uploaded_file.type
             
-            # Step 2: Configure API
             status_text.text("🔧 Connecting to AI..." if language == "English" else "🔧 Conectando con IA...")
             progress_bar.progress(40)
             
             openai.api_key = api_key
             
-            # Step 3: Enhanced system prompt for LATAM context
             status_text.text("📋 Loading FDA regulations..." if language == "English" else "📋 Cargando regulaciones FDA...")
             progress_bar.progress(60)
             
@@ -1142,11 +1038,6 @@ ANALYSIS PRIORITIES:
    - [RULE: FONT_HIERARCHY] Title should be largest text
    - [RULE: SEPARATORS] Proper separator lines between sections
 
-4. HELPFUL GUIDANCE
-   - Note any Spanish text that needs English translation
-   - Suggest improvements for US consumer clarity
-   - Flag cultural differences in labeling practices
-
 FDA REGULATIONS:
 {rules_content}
 
@@ -1167,28 +1058,17 @@ OUTPUT FORMAT (Critical for LATAM exporters):
 - [Specific guidance for adapting from {origin_country} to US market]
 
 **💡 NEXT STEPS:**
-[Prioritized action items with specific fixes]
-
-IMPORTANT REMINDERS:
-- Be encouraging - entering a new market is challenging
-- Explain the "why" behind each rule
-- Provide specific, actionable fixes
-- Remember: This is their ticket to the US market!"""
+[Prioritized action items with specific fixes]"""
             
-            # Step 4: Make API call
             status_text.text("🤖 AI analyzing your label..." if language == "English" else "🤖 IA analizando su etiqueta...")
             progress_bar.progress(80)
             
-            # Prepare image URL outside of the API call to avoid nested f-strings
             image_data_url = f"data:{image_type};base64,{base64_image}"
             
             response = openai.ChatCompletion.create(
                 model=model_choice,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": [
@@ -1198,10 +1078,7 @@ IMPORTANT REMINDERS:
                             },
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": image_data_url,
-                                    "detail": "high"
-                                }
+                                "image_url": {"url": image_data_url, "detail": "high"}
                             }
                         ]
                     }
@@ -1210,21 +1087,17 @@ IMPORTANT REMINDERS:
                 temperature=temperature
             )
             
-            # Step 5: Process results
             status_text.text("✅ Analysis complete!" if language == "English" else "✅ ¡Análisis completo!")
             progress_bar.progress(100)
             
             analysis = response['choices'][0]['message']['content']
             
-            # Determine export readiness
             is_ready = "EXPORT READINESS: READY" in analysis
             needs_fixes = "NEEDS FIXES" in analysis
             
-            # Calculate cost savings
-            consultant_cost = 500  # Average consultant fee
-            time_saved = 14  # Days saved
+            consultant_cost = 500
+            time_saved = 14
             
-            # Store results
             st.session_state.last_analysis = {
                 'timestamp': datetime.now(),
                 'filename': uploaded_file.name,
@@ -1249,40 +1122,13 @@ IMPORTANT REMINDERS:
             
             with st.expander("🔍 Error Details"):
                 st.code(str(e))
-                if language == "Español":
-                    st.info("""
-                    **Problemas Comunes:**
-                    - Clave API inválida o expirada
-                    - Problemas de conectividad
-                    - Archivo de imagen corrupto
-                    
-                    **Próximos Pasos:**
-                    1. Verifique la clave API
-                    2. Verifique el archivo de imagen
-                    3. Espere 60 segundos e intente nuevamente
-                    4. Contacte al administrador si persiste
-                    """)
-                else:
-                    st.info("""
-                    **Common Issues:**
-                    - Invalid or expired API key
-                    - Network connectivity issues
-                    - Corrupted image file
-                    
-                    **Next Steps:**
-                    1. Verify API key in secrets
-                    2. Check image file integrity
-                    3. Wait 60 seconds and retry
-                    4. Contact administrator if problem persists
-                    """)
 
-# Display results
+# Display audit results
 if 'last_analysis' in st.session_state:
     st.markdown("---")
     
     result = st.session_state.last_analysis
     
-    # Savings display
     cost_saved = result.get('cost_saved', 495)
     time_saved = result.get('time_saved', 14)
     
@@ -1294,7 +1140,6 @@ if 'last_analysis' in st.session_state:
     </div>
     """, unsafe_allow_html=True)
     
-    # Status display
     col_status, col_info = st.columns([2, 1])
     
     export_ready = result.get('export_ready', False)
@@ -1329,71 +1174,48 @@ if 'last_analysis' in st.session_state:
         st.metric("Origin", origin)
         st.metric("Target", "🇺🇸 USA")
     
-    # Detailed analysis
     st.subheader(f"📋 {t['results']}")
     st.markdown(result['analysis'])
     
-    # Export options
     st.markdown("---")
     st.subheader(f"📥 {t['export']}")
     
     col_exp1, col_exp2, col_exp3 = st.columns(3)
     
     with col_exp1:
-        # Bilingual text report
         if language == "Español":
-            report_header = "REPORTE DE CUMPLIMIENTO FDA - EXPORTACIÓN A USA"
+            report_header = "REPORTE DE CUMPLIMIENTO FDA"
             report_template = f"""
 {report_header}
 {'=' * 70}
 
-Fecha de Análisis: {result['timestamp'].strftime("%Y-%m-%d %H:%M:%S")}
-País de Origen: {result['origin_country']}
-Archivo: {result['filename']}
-Mercado Objetivo: Estados Unidos (FDA)
-Estado: {"LISTO PARA EXPORTAR" if result['export_ready'] else "REQUIERE CORRECCIONES"}
+Fecha: {result['timestamp'].strftime("%Y-%m-%d")}
+País: {result['origin_country']}
+Estado: {"LISTO" if result['export_ready'] else "REQUIERE CORRECCIONES"}
 
-Ahorro vs Consultor: ${result['cost_saved']} USD
-Tiempo Ahorrado: {result['time_saved']} días
-
-{'=' * 70}
-ANÁLISIS DETALLADO:
-{'=' * 70}
+Ahorro: ${result['cost_saved']} USD
+Tiempo: {result['time_saved']} días
 
 {result['analysis']}
-
-{'=' * 70}
-FIN DEL REPORTE
-Generado por LATAM → USA Export Compliance Tool v1.0
 """
         else:
-            report_template = f"""US FDA COMPLIANCE REPORT - LATAM FOOD EXPORT
+            report_template = f"""US FDA COMPLIANCE REPORT
 {'=' * 70}
 
-Analysis Date: {result['timestamp'].strftime("%Y-%m-%d %H:%M:%S")}
-Origin Country: {result['origin_country']}
-Label File: {result['filename']}
-Target Market: United States (FDA)
-Export Status: {"READY" if result['export_ready'] else "NEEDS REVISION"}
+Date: {result['timestamp'].strftime("%Y-%m-%d")}
+Origin: {result['origin_country']}
+Status: {"READY" if result['export_ready'] else "NEEDS REVISION"}
 
-Savings vs Consultant: ${result['cost_saved']} USD
-Time Saved: {result['time_saved']} days
-
-{'=' * 70}
-DETAILED ANALYSIS:
-{'=' * 70}
+Savings: ${result['cost_saved']} USD
+Time: {result['time_saved']} days
 
 {result['analysis']}
-
-{'=' * 70}
-END OF REPORT
-Generated by LATAM → USA Export Compliance Tool v1.0
 """
         
         st.download_button(
             "📄 Text Report",
             data=report_template,
-            file_name=f"USA_Export_Audit_{result['filename']}_{result['timestamp'].strftime('%Y%m%d')}.txt",
+            file_name=f"FDA_Audit_{result['timestamp'].strftime('%Y%m%d')}.txt",
             mime="text/plain",
             use_container_width=True
         )
@@ -1403,85 +1225,57 @@ Generated by LATAM → USA Export Compliance Tool v1.0
             "export_audit": {
                 "timestamp": result['timestamp'].isoformat(),
                 "origin_country": result['origin_country'],
-                "target_market": "USA (FDA)",
-                "filename": result['filename'],
                 "export_ready": result['export_ready'],
-                "cost_saved_usd": result['cost_saved'],
-                "time_saved_days": result['time_saved']
+                "cost_saved_usd": result['cost_saved']
             },
-            "analysis": result['analysis'],
-            "tool_version": "1.0.0"
+            "analysis": result['analysis']
         }
         
         st.download_button(
             "📊 JSON Data",
             data=json.dumps(json_data, indent=2, ensure_ascii=False),
-            file_name=f"USA_Export_Audit_{result['timestamp'].strftime('%Y%m%d')}.json",
+            file_name=f"FDA_Audit_{result['timestamp'].strftime('%Y%m%d')}.json",
             mime="application/json",
             use_container_width=True
         )
     
     with col_exp3:
-        html_report = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>US FDA Export Compliance Report</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
-                .header {{ background: linear-gradient(90deg, #00A859, #0066B2); color: white; padding: 30px; border-radius: 10px; }}
-                .status {{ padding: 20px; margin: 20px 0; border-radius: 8px; border-left: 6px solid; }}
-                .ready {{ background-color: #d4edda; border-color: #28a745; }}
-                .fixes {{ background-color: #fff3cd; border-color: #ffc107; }}
-                .revision {{ background-color: #f8d7da; border-color: #dc3545; }}
-                .metadata {{ background-color: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 8px; }}
-                .savings {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0; }}
-                .analysis {{ line-height: 1.8; white-space: pre-wrap; }}
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>🌎 LATAM → USA Food Export Compliance Report</h1>
-                <p>US FDA Regulation 21 CFR 101.9 Analysis</p>
-            </div>
-            
-            <div class="savings">
-                <h2>💰 Value Delivered</h2>
-                <h3>${result['cost_saved']} USD saved • {result['time_saved']} days faster</h3>
-            </div>
-            
-            <div class="metadata">
-                <p><strong>Analysis Date:</strong> {result['timestamp'].strftime("%Y-%m-%d %H:%M:%S")}</p>
-                <p><strong>Origin Country:</strong> {result['origin_country']}</p>
-                <p><strong>Target Market:</strong> 🇺🇸 United States (FDA)</p>
-                <p><strong>Label File:</strong> {result['filename']}</p>
-            </div>
-            
-            <div class="status {'ready' if result['export_ready'] else 'fixes' if result['needs_fixes'] else 'revision'}">
-                <h2>Export Status: {'✅ READY FOR USA MARKET' if result['export_ready'] else '⚠️ NEEDS FIXES' if result['needs_fixes'] else '❌ MAJOR REVISION NEEDED'}</h2>
-            </div>
-            
-            <div class="analysis">
-                <h3>Detailed Compliance Analysis:</h3>
-                {result['analysis']}
-            </div>
-            
-            <hr>
-            <p><em>Generated by LATAM → USA Export Compliance Tool v1.0 | Helping LATAM exporters succeed in the US market</em></p>
-        </body>
-        </html>
-        """
+        html_report = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FDA Compliance Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+        .header {{ background: linear-gradient(90deg, #00A859, #0066B2); color: white; padding: 30px; border-radius: 10px; }}
+        .status {{ padding: 20px; margin: 20px 0; border-radius: 8px; border-left: 6px solid; }}
+        .ready {{ background-color: #d4edda; border-color: #28a745; }}
+        .fixes {{ background-color: #fff3cd; border-color: #ffc107; }}
+        .analysis {{ line-height: 1.8; white-space: pre-wrap; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌎 LATAM → USA FDA Compliance Report</h1>
+    </div>
+    <div class="status {'ready' if result['export_ready'] else 'fixes'}">
+        <h2>{'✅ READY' if result['export_ready'] else '⚠️ NEEDS FIXES'}</h2>
+    </div>
+    <p><strong>Date:</strong> {result['timestamp'].strftime("%Y-%m-%d")}</p>
+    <p><strong>Origin:</strong> {result['origin_country']}</p>
+    <div class="analysis">{result['analysis']}</div>
+</body>
+</html>"""
         
         st.download_button(
             "🌐 HTML Report",
             data=html_report,
-            file_name=f"USA_Export_Audit_{result['timestamp'].strftime('%Y%m%d')}.html",
+            file_name=f"FDA_Audit_{result['timestamp'].strftime('%Y%m%d')}.html",
             mime="text/html",
             use_container_width=True
         )
 
-# Footer with LATAM-specific information
+# Footer
 st.markdown("---")
 
 tab1, tab2, tab3 = st.tabs(["📖 About", "🎓 Resources", "💼 Pricing"])
@@ -1504,12 +1298,6 @@ with tab1:
         - ✅ Solo $5 por etiqueta
         - ✅ Retroalimentación específica y accionable
         - ✅ Disponible 24/7
-        
-        **Casos de uso:**
-        1. Verificación rápida antes de contratar un consultor
-        2. Validación de cambios de etiqueta
-        3. Educación del equipo sobre requisitos de FDA
-        4. Preparación para certificación oficial
         """)
     else:
         st.markdown("""
@@ -1528,12 +1316,6 @@ with tab1:
         - ✅ Only $5 per label
         - ✅ Specific, actionable feedback
         - ✅ Available 24/7
-        
-        **Use cases:**
-        1. Quick check before hiring expensive consultant
-        2. Validate label changes
-        3. Train your team on FDA requirements
-        4. Prepare for official certification
         """)
 
 with tab2:
@@ -1550,41 +1332,6 @@ with tab2:
     3. ❌ Wrong serving size standards
     4. ❌ Missing "Added Sugars" declaration
     5. ❌ Incorrect %DV calculations
-    
-    **Country-Specific Regulatory Differences:**
-    
-    **🇲🇽 Mexico (NOM-051-SCFI/SSA1-2010):**
-    - Uses front-of-package warning labels (not required in USA)
-    - Different serving size standards
-    - May not require Added Sugars declaration
-    - Trans fat limits differ from FDA
-    
-    **🇨🇴 Colombia (Resolution 2492/2022):**
-    - Uses front-of-package warning stamps
-    - Different nutrient rounding rules
-    - May group some nutrients differently
-    - Sodium limits more strict than FDA
-    
-    **🇨🇱 Chile (Law 20.606):**
-    - "Alto en" (High in) warning system not used in USA
-    - Different portion size standards
-    - May not separate Added Sugars
-    - Front labels required (not in USA)
-    
-    **🇧🇷 Brazil (RDC 429/2020):**
-    - ANVISA uses different serving sizes than FDA
-    - Front-of-pack nutrition labeling differs
-    - Different %DV reference values
-    - May use "Valor Energético" instead of Calories
-    
-    **Key Takeaway:** Your home country's compliant label likely needs significant changes for USA market!
-    
-    **Next Steps After Using This Tool:**
-    1. Fix all "CRITICAL VIOLATIONS" immediately
-    2. Address "ADVISORIES" before production
-    3. Have your designer create final label with FDA format
-    4. Consider hiring FDA consultant for final review ($200-500)
-    5. Submit sample to FDA if product requires pre-approval
     """)
 
 with tab3:
@@ -1592,66 +1339,34 @@ with tab3:
         st.markdown("""
         ### 💼 Precios Transparentes
         
-        **🎯 Por Etiqueta (Sin Compromiso):**
-        - $5 USD por análisis individual
+        **🎯 Por Etiqueta:**
+        - $5 USD por análisis
         - Pago por uso
-        - Reportes completos incluidos
         
-        **📦 Paquete PYME (Pequeñas/Medianas Empresas):**
+        **📦 Paquete PYME:**
         - 50 análisis: $200 USD ($4/etiqueta)
-        - Válido por 6 meses
-        - Soporte por email
         
         **🏢 Paquete Empresa:**
         - 200 análisis: $600 USD ($3/etiqueta)
-        - Válido por 12 meses
-        - Soporte prioritario
-        - Consulta mensual incluida
         
-        **🌟 Paquete Distribuidor/Exportador:**
-        - Análisis ilimitados: $2,500 USD/mes
-        - Procesamiento por lotes
-        - Soporte dedicado
-        - Capacitación del equipo
-        - Integración API
-        
-        **Compare con consultores tradicionales:**
-        - Consultor típico: $500-2000 por etiqueta ❌
-        - Nuestra herramienta: $3-5 por etiqueta ✅
-        - **Ahorro: 90-95%**
+        **Compare: Consultor típico $500-2000 ❌ vs Nuestra herramienta $3-5 ✅**
         """)
     else:
         st.markdown("""
         ### 💼 Transparent Pricing
         
-        **🎯 Per-Label (No Commitment):**
-        - $5 USD per individual analysis
+        **🎯 Per-Label:**
+        - $5 USD per analysis
         - Pay as you go
-        - Full reports included
         
-        **📦 SME Package (Small/Medium Exporters):**
+        **📦 SME Package:**
         - 50 analyses: $200 USD ($4/label)
-        - Valid for 6 months
-        - Email support included
         
-        **🏢 Enterprise Package:**
+        **🏢 Enterprise:**
         - 200 analyses: $600 USD ($3/label)
-        - Valid for 12 months
-        - Priority support
-        - Monthly consultation call
         
-        **🌟 Distributor/Large Exporter:**
-        - Unlimited analyses: $2,500 USD/month
-        - Batch processing
-        - Dedicated support
-        - Team training
-        - API integration
-        
-        **Compare to traditional consultants:**
-        - Typical consultant: $500-2000 per label ❌
-        - Our tool: $3-5 per label ✅
-        - **Savings: 90-95%**
+        **Compare: Typical consultant $500-2000 ❌ vs Our tool $3-5 ✅**
         """)
 
 st.markdown("---")
-st.caption("🌎 Helping LATAM food exporters succeed in the US market | © 2026 LATAM → USA Export Compliance Tool")
+st.caption("🌎 Helping LATAM food exporters succeed in the US market | © 2026 LATAM → USA Export Tool v2.0")
