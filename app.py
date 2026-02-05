@@ -79,7 +79,17 @@ def apply_fda_rounding_rules(value, nutrient_type):
         else:
             return str(int(round(val / 10) * 10))
     
-    elif nutrient_type in ['total_carb', 'fiber', 'total_sugars', 'added_sugars', 'protein']:
+    elif nutrient_type in ['total_carb', 'fiber', 'total_sugars', 'added_sugars']:
+        # Carbohydrates and sugars: <0.5g = 0g, ≥0.5g round to nearest 1g
+        if val < 0.5:
+            return "0"
+        else:
+            return str(int(round(val)))
+    
+    elif nutrient_type == 'protein':
+        # Protein rounding per FDA 21 CFR 101.9(c)(7):
+        # <0.5g = 0g
+        # ≥0.5g = round to nearest gram (so 0.5-1.4 = 1g, 1.5-2.4 = 2g, etc.)
         if val < 0.5:
             return "0"
         else:
@@ -291,7 +301,7 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
                 <div class="nutrient-label">
                     <span class="nutrient-main">Protein</span> <span class="nutrient-amount">{protein}g</span>
                 </div>
-                <div class="nutrient-dv"></div>
+                <div class="nutrient-dv">{get_dv('protein') if get_dv('protein') > 0 else ''}</div>
             </div>
             
             <div class="bar-thick"></div>
@@ -531,8 +541,9 @@ class EnhancedFDAConverter:
             'total_fat': 'total_fat_g', 'saturated_fat': 'saturated_fat_g',
             'cholesterol': 'cholesterol_mg', 'sodium': 'sodium_mg',
             'total_carb': 'total_carb_g', 'fiber': 'fiber_g',
-            'added_sugars': 'added_sugars_g', 'vitamin_d': 'vitamin_d_mcg',
-            'calcium': 'calcium_mg', 'iron': 'iron_mg', 'potassium': 'potassium_mg'
+            'added_sugars': 'added_sugars_g', 'protein': 'protein_g',
+            'vitamin_d': 'vitamin_d_mcg', 'calcium': 'calcium_mg', 
+            'iron': 'iron_mg', 'potassium': 'potassium_mg'
         }
         
         for nutrient, field in mappings.items():
