@@ -1615,7 +1615,14 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             # Parse JSON
             data_text = extraction_response['choices'][0]['message']['content']
             data_text = data_text.replace('```json', '').replace('```', '').strip()
-            label_data = json.loads(data_text)
+            
+            try:
+                label_data = json.loads(data_text)
+            except json.JSONDecodeError as e:
+                st.error("❌ Could not parse AI response as JSON")
+                with st.expander("🔍 Debug Info"):
+                    st.code(data_text)
+                raise
             
             # ===== CRITICAL FIX: POLYOL CORRECTION LOGIC =====
             # This MUST run to fix AI's polyol confusion
@@ -1652,7 +1659,7 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
                     added_sugars_val = float(added_sugars_raw) if added_sugars_raw else 0
                     sugar_alcohols_val = float(sugar_alcohols_raw) if sugar_alcohols_raw else 0
                     total_sugars_val = float(total_sugars_raw) if total_sugars_raw else 0
-                except:
+                except (ValueError, TypeError):
                     added_sugars_val = 0
                     sugar_alcohols_val = 0
                     total_sugars_val = 0
