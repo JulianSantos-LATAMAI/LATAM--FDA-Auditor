@@ -848,7 +848,7 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
                 <div class="nutrient-label">
                     <span class="nutrient-main">Protein</span> <span class="nutrient-amount">{protein}g</span>
                 </div>
-                <div class="nutrient-dv">{get_dv('protein') if get_dv('protein') > 0 else ''}</div>
+                <div class="nutrient-dv"></div>
             </div>
             
             <div class="bar-thick"></div>
