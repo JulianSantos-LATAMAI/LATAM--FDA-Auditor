@@ -1612,16 +1612,18 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             status_text.text("✅ Label data extracted!" if language == "English" else "✅ ¡Datos de etiqueta extraídos!")
             progress_bar.progress(60)
             
-            # Parse JSON
-            data_text = extraction_response['choices'][0]['message']['content']
-            data_text = data_text.replace('```json', '').replace('```', '').strip()
-            
+            # Parse JSON with error handling
             try:
+                data_text = extraction_response['choices'][0]['message']['content']
+                data_text = data_text.replace('```json', '').replace('```', '').strip()
                 label_data = json.loads(data_text)
-            except json.JSONDecodeError as e:
-                st.error("❌ Could not parse AI response as JSON")
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                progress_bar.empty()
+                status_text.empty()
+                st.error("❌ Could not parse AI response")
                 with st.expander("🔍 Debug Info"):
-                    st.code(data_text)
+                    st.code(data_text if 'data_text' in locals() else "No data")
+                    st.error(str(e))
                 raise
             
             # ===== CRITICAL FIX: POLYOL CORRECTION LOGIC =====
@@ -2270,12 +2272,13 @@ FDA Compliance Platform for International Exporters
             progress_bar.empty()
             status_text.empty()
             
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, KeyError) as e:
             progress_bar.empty()
             status_text.empty()
             st.error("❌ Could not parse label data")
             with st.expander("🔍 Debug Info"):
-                st.code(data_text)
+                st.code(data_text if 'data_text' in locals() else "No response")
+                st.error(str(e))
                 
         except Exception as e:
             progress_bar.empty()
