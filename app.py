@@ -899,8 +899,9 @@ st.markdown("""
 
 operation_mode = st.radio(
     "🔧 Select Tool Mode:",
-    ["🔍 Audit Existing Label", "🔄 Convert LATAM Label to FDA Format"],
-    horizontal=True
+    ["🔍 Audit Existing Label", "🔄 Convert LATAM Label to FDA Format", "🎨 Complete Label Compliance"],
+    horizontal=True,
+    help="Audit FDA label | Convert nutrition panel | Analyze entire label for complete FDA compliance"
 )
 
 st.markdown("---")
