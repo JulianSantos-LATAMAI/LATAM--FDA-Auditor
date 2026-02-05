@@ -172,23 +172,47 @@ class CompleteLabelValidator:
             
             # Check for sugar alcohols (polyols) that might be miscategorized
             sugar_alcohols = nutrition.get('sugar_alcohols_g')
+            added_sugars = nutrition.get('added_sugars_g')
+            
             if sugar_alcohols and float(sugar_alcohols) > 0:
                 changes_made.append(f"Identified {sugar_alcohols}g sugar alcohols (polyols) - these are NOT added sugars")
                 issues['passed'].append(f'✅ Sugar alcohols properly separated from added sugars')
             
             # Detect if ingredient list has polyols
             ingredients_text = (info.get('ingredient_list_english') or info.get('ingredient_list_original', '')).lower()
-            polyol_keywords = ['maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 'lactitol', 'polioles', 'polyols']
-            if any(keyword in ingredients_text for keyword in polyol_keywords):
+            polyol_keywords = ['maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 'lactitol', 'polioles', 'polyols', 'polialcoholes']
+            has_polyols = any(keyword in ingredients_text for keyword in polyol_keywords)
+            
+            if has_polyols:
+                # Check if Mexican label format
+                is_mexican = nf_format and 'mexican' in nf_format.lower()
+                mexican_origin = origin_country and 'mexico' in origin_country.lower()
+                
+                if is_mexican or mexican_origin:
+                    changes_made.append("⚠️ MEXICAN LABEL: Polyols detected - Mexican 'Azúcares añadidos' correctly excludes polyols (same as FDA)")
+                    if added_sugars and float(added_sugars) == 0:
+                        issues['passed'].append("✅ Added sugars = 0g is correct for products with only polyols")
+                
                 if not sugar_alcohols or float(sugar_alcohols) == 0:
                     issues['major'].append({
                         'requirement': 'Sugar Alcohols Declaration',
-                        'issue': 'Sugar alcohols/polyols detected in ingredients but not listed separately in nutrition facts',
+                        'issue': 'Sugar alcohols/polyols detected in ingredients but not listed in nutrition facts',
                         'regulation': '21 CFR 101.9(c)(6)(iii)',
-                        'fix': 'List sugar alcohols separately (not as added sugars): "Sugar Alcohol Xg"',
-                        'risk': 'Incorrect added sugars value'
+                        'fix': 'Add separate line: "Sugar Alcohol Xg" (indented under Total Carbohydrate)',
+                        'risk': 'Incomplete nutrition information'
                     })
-                    changes_made.append("WARNING: Polyols detected - ensure these are NOT counted as added sugars")
+                    changes_made.append("⚠️ WARNING: Polyols in ingredients - must be declared separately on US labels")
+                
+                # Extra validation: ensure polyols aren't counted as added sugars
+                if added_sugars and float(added_sugars) > 0:
+                    issues['major'].append({
+                        'requirement': 'Added Sugars vs Sugar Alcohols',
+                        'issue': 'Product contains polyols - verify added sugars do not include sugar alcohols',
+                        'regulation': '21 CFR 101.9(c)(6)(iii)',
+                        'fix': 'Separate polyols from added sugars. If only sweetener is polyols, added sugars should be 0g',
+                        'risk': 'Incorrect added sugars declaration'
+                    })
+                    changes_made.append("⚠️ VERIFY: Product has polyols - ensure added sugars calculation excludes them")
         
         # 4. Ingredients List
         ingredients_original = info.get('ingredient_list_original', '')
@@ -516,9 +540,20 @@ CRITICAL DISTINCTION - Added Sugars vs Sugar Alcohols:
 - Maltitol, sorbitol, xylitol, erythritol, isomalt
 - Mannitol, lactitol, hydrogenated starch hydrolysates
 - Any ingredient ending in "-itol"
-- Listed as "Polioles" in Spanish labels
+- Listed as "Polioles" or "Polialcoholes" in Spanish labels
+- Listed as "Outros carboidratos" in Portuguese/Brazilian labels
 
-If you see sugar alcohols/polyols in the ingredient list, they should be listed separately in nutrition data, NOT as added sugars.
+**MEXICAN LABEL SPECIAL CASE:**
+If you see "Azúcares añadidos" on a Mexican label (NOM-051):
+- Mexican "Azúcares añadidos" follows SAME definition as FDA "Added Sugars"
+- If it says "0g", it means NO added sugars (polyols don't count)
+- DO NOT confuse polyols with added sugars
+- Look for separate line: "Polialcoholes" or in ingredient list: maltitol, sorbitol, etc.
+
+**CHILEAN LABEL SPECIAL CASE:**
+Chilean labels may show "Alto en Azúcares" (high in sugars) seal
+- This refers to TOTAL sugars, not added sugars
+- Must calculate added sugars from ingredient list
 
 Extract nutrition data if present:
 Scan ingredients for FDA's 9 major allergens:
@@ -592,6 +627,14 @@ CRITICAL INSTRUCTIONS:
 - If anything is missing, use null (not empty string)
 - Be thorough - extract everything visible on the label
 - Note cultural/regional labeling elements (sellos, warnings, etc.)
+
+**MEXICAN LABELS - POLYOL HANDLING:**
+If label shows "Azúcares añadidos: 0g" AND ingredients contain maltitol/polyols:
+- This is CORRECT - Mexican NOM-051 excludes polyols from "azúcares añadidos"
+- FDA also excludes polyols from "added sugars"
+- Extract as: "added_sugars_g": "0"
+- Extract polyols separately in: "sugar_alcohols_g": "[amount if shown]"
+- DO NOT add polyol amounts to added sugars
 
 Extract now:"""
 
