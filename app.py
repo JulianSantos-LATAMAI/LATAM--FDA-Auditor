@@ -1173,7 +1173,7 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
 # COMPLETE LABEL COMPLIANCE ENGINE (NEW!)
 # ============================================================================
 
-elif operation_mode == "🎨 Complete Label Compliance (NEW)" and action_button:
+if operation_mode == "🎨 Complete Label Compliance" and action_button:
     if not checks_passed:
         st.error("❌ Cannot proceed. Please resolve issues above.")
     else:
