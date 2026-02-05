@@ -169,6 +169,26 @@ class CompleteLabelValidator:
                 changes_made.append(f"Converting from {nf_format} format to US FDA format")
             else:
                 issues['passed'].append('✅ Nutrition Facts panel present')
+            
+            # Check for sugar alcohols (polyols) that might be miscategorized
+            sugar_alcohols = nutrition.get('sugar_alcohols_g')
+            if sugar_alcohols and float(sugar_alcohols) > 0:
+                changes_made.append(f"Identified {sugar_alcohols}g sugar alcohols (polyols) - these are NOT added sugars")
+                issues['passed'].append(f'✅ Sugar alcohols properly separated from added sugars')
+            
+            # Detect if ingredient list has polyols
+            ingredients_text = (info.get('ingredient_list_english') or info.get('ingredient_list_original', '')).lower()
+            polyol_keywords = ['maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 'lactitol', 'polioles', 'polyols']
+            if any(keyword in ingredients_text for keyword in polyol_keywords):
+                if not sugar_alcohols or float(sugar_alcohols) == 0:
+                    issues['major'].append({
+                        'requirement': 'Sugar Alcohols Declaration',
+                        'issue': 'Sugar alcohols/polyols detected in ingredients but not listed separately in nutrition facts',
+                        'regulation': '21 CFR 101.9(c)(6)(iii)',
+                        'fix': 'List sugar alcohols separately (not as added sugars): "Sugar Alcohol Xg"',
+                        'risk': 'Incorrect added sugars value'
+                    })
+                    changes_made.append("WARNING: Polyols detected - ensure these are NOT counted as added sugars")
         
         # 4. Ingredients List
         ingredients_original = info.get('ingredient_list_original', '')
@@ -481,7 +501,26 @@ Extract the following five mandatory elements from the label. If missing, note a
 - Note any Brazilian "Contém" allergen warnings
 - Identify all marketing claims (Organic, Natural, Sugar-Free, etc.)
 
-### STEP 3: ALLERGEN DETECTION
+### STEP 3: NUTRITION FACTS EXTRACTION
+
+CRITICAL DISTINCTION - Added Sugars vs Sugar Alcohols:
+
+**ADDED SUGARS (include these):**
+- Sugar, sucrose, glucose, fructose, dextrose
+- Corn syrup, high fructose corn syrup, maple syrup
+- Honey, agave nectar, molasses
+- Concentrated fruit juice, fruit juice concentrate
+- Brown sugar, raw sugar, cane sugar
+
+**SUGAR ALCOHOLS / POLYOLS (DO NOT count as added sugars):**
+- Maltitol, sorbitol, xylitol, erythritol, isomalt
+- Mannitol, lactitol, hydrogenated starch hydrolysates
+- Any ingredient ending in "-itol"
+- Listed as "Polioles" in Spanish labels
+
+If you see sugar alcohols/polyols in the ingredient list, they should be listed separately in nutrition data, NOT as added sugars.
+
+Extract nutrition data if present:
 Scan ingredients for FDA's 9 major allergens:
 - Milk, Eggs, Fish, Shellfish, Tree nuts, Peanuts, Wheat, Soybeans, Sesame
 - Note if allergen statement exists (CONTAINS:, CONTIENE:, etc.)
@@ -529,7 +568,8 @@ Return ONLY valid JSON with this exact structure:
         "total_carb_g": "number",
         "fiber_g": "number",
         "total_sugars_g": "number",
-        "added_sugars_g": "number or null if not specified",
+        "added_sugars_g": "number or null if not specified (DO NOT include sugar alcohols here)",
+        "sugar_alcohols_g": "number or null (maltitol, sorbitol, xylitol, etc.)",
         "protein_g": "number",
         "vitamin_d_mcg": "number or null",
         "calcium_mg": "number or null",
