@@ -1728,6 +1728,9 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
                 else:
                     st.success(f"✅ Added Sugars already 0g - correct!")
                     sugar_alcohols_val = float(sugar_alcohols_raw) if sugar_alcohols_raw else 0
+                except:
+                    added_sugars_val = 0
+                    sugar_alcohols_val = 0
                 
                 st.warning(f"📊 **AI Extracted:** Added Sugars = {added_sugars_val}g, Sugar Alcohols = {sugar_alcohols_val}g")
                 
