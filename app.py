@@ -7,6 +7,236 @@ from datetime import datetime
 import json
 import re
 from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+
+# ============================================================================
+# COMPLETE LABEL COMPLIANCE MODULE
+# ============================================================================
+
+@dataclass
+class FDARequirement:
+    """Represents a single FDA requirement"""
+    category: str
+    requirement: str
+    regulation: str
+    severity: str
+    description: str
+
+
+class AllergenDetector:
+    """Detects allergens in ingredient lists"""
+    
+    MAJOR_ALLERGENS = {
+        'milk': ['milk', 'cream', 'butter', 'cheese', 'whey', 'casein', 'lactose', 'ghee'],
+        'eggs': ['egg', 'eggs', 'albumin', 'lysozyme', 'mayonnaise'],
+        'fish': ['fish', 'anchovies', 'bass', 'cod', 'salmon', 'tuna', 'tilapia'],
+        'shellfish': ['crab', 'lobster', 'shrimp', 'prawns', 'clams', 'mussels', 'oysters', 'scallops'],
+        'tree_nuts': ['almond', 'cashew', 'walnut', 'pecan', 'pistachio', 'hazelnut', 'macadamia'],
+        'peanuts': ['peanut', 'peanuts', 'groundnut'],
+        'wheat': ['wheat', 'flour', 'durum', 'semolina', 'spelt'],
+        'soybeans': ['soy', 'soya', 'soybean', 'tofu', 'tempeh', 'lecithin'],
+        'sesame': ['sesame', 'tahini']
+    }
+    
+    @classmethod
+    def detect_allergens(cls, ingredient_text: str) -> Dict[str, List[str]]:
+        """Detect allergens in ingredient text"""
+        ingredient_text_lower = ingredient_text.lower()
+        found_allergens = {}
+        
+        for allergen_type, keywords in cls.MAJOR_ALLERGENS.items():
+            found = []
+            for keyword in keywords:
+                pattern = r'\b' + re.escape(keyword) + r'\b'
+                if re.search(pattern, ingredient_text_lower):
+                    found.append(keyword)
+            if found:
+                found_allergens[allergen_type] = found
+        
+        return found_allergens
+
+
+class CompleteLabelValidator:
+    """Validates complete food label for FDA compliance"""
+    
+    def __init__(self):
+        self.allergen_detector = AllergenDetector()
+    
+    def validate_complete_label(self, extracted_data: Dict) -> Dict:
+        """Perform complete FDA compliance validation"""
+        
+        issues = {'critical': [], 'major': [], 'minor': [], 'passed': []}
+        
+        pdp = extracted_data.get('principal_display_panel', {})
+        info = extracted_data.get('information_panel', {})
+        lang = extracted_data.get('language_detection', {})
+        
+        # Product Name Check
+        if not pdp.get('product_name'):
+            issues['critical'].append({
+                'requirement': 'Statement of Identity',
+                'issue': 'Product name not found',
+                'regulation': '21 CFR 101.3',
+                'fix': 'Add clear product name describing what product is'
+            })
+        else:
+            issues['passed'].append('✅ Product name present')
+        
+        # Net Quantity Check
+        net_qty = pdp.get('net_quantity', '')
+        if net_qty:
+            has_us = any(u in net_qty.lower() for u in ['oz', 'lb', 'fl oz'])
+            has_metric = any(u in net_qty.lower() for u in ['g', 'kg', 'ml', 'l'])
+            
+            if not has_us:
+                issues['critical'].append({
+                    'requirement': 'Net Quantity - US Units',
+                    'issue': 'Missing US units (oz, lb)',
+                    'regulation': '21 CFR 101.105',
+                    'fix': 'Add US customary units: "Net Wt 16 oz (454g)"'
+                })
+            if not has_metric:
+                issues['critical'].append({
+                    'requirement': 'Net Quantity - Metric',
+                    'issue': 'Missing metric units',
+                    'regulation': '21 CFR 101.105',
+                    'fix': 'Add metric units in parentheses'
+                })
+            if has_us and has_metric:
+                issues['passed'].append('✅ Net quantity in both units')
+        else:
+            issues['critical'].append({
+                'requirement': 'Net Quantity Declaration',
+                'issue': 'Net quantity not found',
+                'regulation': '21 CFR 101.105',
+                'fix': 'Add: "Net Wt [oz] ([g])" on front panel'
+            })
+        
+        # Language Check
+        primary = lang.get('primary_language', '')
+        if primary and primary.lower() not in ['english', 'unknown']:
+            issues['critical'].append({
+                'requirement': 'English Language',
+                'issue': f'Label primarily in {primary}',
+                'regulation': '21 CFR 101.15',
+                'fix': 'All required info must be in English (bilingual OK)'
+            })
+        else:
+            issues['passed'].append('✅ English language requirement met')
+        
+        # Ingredient List Check
+        ingredients = info.get('ingredient_list', '')
+        if not ingredients:
+            issues['critical'].append({
+                'requirement': 'Ingredient List',
+                'issue': 'Ingredient list not found',
+                'regulation': '21 CFR 101.4',
+                'fix': 'Add ingredient list in descending order by weight'
+            })
+        else:
+            issues['passed'].append('✅ Ingredient list present')
+            
+            # Allergen Check
+            detected = self.allergen_detector.detect_allergens(ingredients)
+            allergen_stmt = info.get('allergen_statement', '')
+            
+            if detected:
+                missing = []
+                for allergen in detected.keys():
+                    allergen_name = allergen.replace('_', ' ')
+                    if allergen_stmt:
+                        if allergen_name not in allergen_stmt.lower():
+                            missing.append(allergen_name.title())
+                    else:
+                        missing.append(allergen_name.title())
+                
+                if missing:
+                    issues['critical'].append({
+                        'requirement': 'Allergen Declaration',
+                        'issue': f'Allergens detected but not declared: {", ".join(missing)}',
+                        'regulation': '21 CFR 101.22',
+                        'fix': f'Add: "CONTAINS: {", ".join([a.upper() for a in missing])}"'
+                    })
+                else:
+                    issues['passed'].append('✅ Allergens properly declared')
+        
+        # Manufacturer Info Check
+        if not info.get('manufacturer_name'):
+            issues['critical'].append({
+                'requirement': 'Manufacturer Information',
+                'issue': 'Manufacturer name/address not found',
+                'regulation': '21 CFR 101.5',
+                'fix': 'Add: "Manufactured for [Company], [City, State ZIP]"'
+            })
+        else:
+            issues['passed'].append('✅ Manufacturer information present')
+        
+        # Nutrition Facts Check
+        if not extracted_data.get('nutrition_facts', {}).get('present'):
+            issues['major'].append({
+                'requirement': 'Nutrition Facts Panel',
+                'issue': 'Nutrition Facts not detected',
+                'regulation': '21 CFR 101.9',
+                'fix': 'Add FDA-compliant Nutrition Facts panel'
+            })
+        else:
+            issues['passed'].append('✅ Nutrition Facts panel present')
+        
+        # Calculate compliance score
+        total_issues = len(issues['critical']) + len(issues['major'])
+        compliance_score = max(0, 100 - (len(issues['critical']) * 20) - (len(issues['major']) * 10))
+        
+        if len(issues['critical']) == 0:
+            status = "READY FOR US MARKET"
+            export_ready = True
+        elif len(issues['critical']) <= 2:
+            status = "NEEDS FIXES"
+            export_ready = False
+        else:
+            status = "MAJOR REVISION NEEDED"
+            export_ready = False
+        
+        return {
+            'compliance_score': compliance_score,
+            'export_ready': export_ready,
+            'status': status,
+            'issues': issues,
+            'total_issues': total_issues,
+            'detected_allergens': detected if ingredients else {}
+        }
+
+
+# Complete Label Extraction Prompt
+COMPLETE_LABEL_EXTRACTION_PROMPT = """You are an FDA compliance expert. Extract ALL information from this complete food label.
+
+RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
+
+{
+    "principal_display_panel": {
+        "product_name": "exact product name",
+        "brand_name": "brand if present",
+        "net_quantity": "exact text (e.g., 'Net Wt 16 oz (454g)')",
+        "product_claims": ["any claims like 'organic', 'gluten-free'"]
+    },
+    "information_panel": {
+        "ingredient_list": "complete ingredient list exactly as shown",
+        "allergen_statement": "CONTAINS statement if present, else null",
+        "manufacturer_name": "company name",
+        "manufacturer_address": "full address if shown",
+        "country_of_origin": "country if stated, else null"
+    },
+    "nutrition_facts": {
+        "present": true/false,
+        "serving_size": "serving size if visible",
+        "calories": "calories if visible"
+    },
+    "language_detection": {
+        "primary_language": "English/Spanish/Portuguese/Other",
+        "bilingual": true/false
+    }
+}
+
+Extract all text exactly as it appears. If missing, use null."""
 
 # ============================================================================
 # FDA ROUNDING RULES - EXACT IMPLEMENTATION
@@ -662,8 +892,8 @@ st.markdown(f'<p class="sub-header">{t["subtitle"]}</p>', unsafe_allow_html=True
 
 st.markdown("""
 <div class="savings-badge">
-    <h3 style="margin:0;">⚡ Fast, Affordable, Accurate</h3>
-    <p style="margin:0.5rem 0 0 0;">$5 per label • 60 seconds • Now with PERFECT FDA formatting</p>
+    <h3 style="margin:0;">⚡ Complete FDA Compliance Platform</h3>
+    <p style="margin:0.5rem 0 0 0;">Nutrition Facts + Complete Label Analysis • $99-499 vs $5,000-15,000 consultant</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -725,15 +955,17 @@ with st.sidebar:
         rules_content = None
     
     st.markdown("---")
-    st.caption("🌎 LATAM Export Edition v2.0 - Perfect FDA Format")
+    st.caption("🌎 VeriLabel v3.0 - Complete Compliance")
 
 col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
     if operation_mode == "🔍 Audit Existing Label":
         mode_description = "Upload FDA label" if language == "English" else "Suba etiqueta FDA"
-    else:
+    elif operation_mode == "🔄 Convert LATAM Label to FDA Format":
         mode_description = "Upload LATAM label" if language == "English" else "Suba etiqueta LATAM"
+    else:  # Complete Label Compliance
+        mode_description = "Upload complete label (front & back)" if language == "English" else "Suba etiqueta completa (frente y reverso)"
     
     st.subheader(f"📤 {t['upload']}")
     st.info(f"💡 **{mode_description}**")
@@ -776,8 +1008,10 @@ col_btn1, col_btn2 = st.columns([3, 1])
 with col_btn1:
     if operation_mode == "🔍 Audit Existing Label":
         button_text = f"🔍 {t['analyze']}"
-    else:
+    elif operation_mode == "🔄 Convert LATAM Label to FDA Format":
         button_text = "🔄 Convert to FDA Format"
+    else:  # Complete Label Compliance
+        button_text = "🎨 Analyze Complete Label" if language == "English" else "🎨 Analizar Etiqueta Completa"
     
     action_button = st.button(button_text, type="primary", disabled=not checks_passed, use_container_width=True)
 
@@ -934,5 +1168,349 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             status_text.empty()
             st.error(f"❌ Conversion failed: {str(e)}")
 
+# ============================================================================
+# COMPLETE LABEL COMPLIANCE ENGINE (NEW!)
+# ============================================================================
+
+elif operation_mode == "🎨 Complete Label Compliance (NEW)" and action_button:
+    if not checks_passed:
+        st.error("❌ Cannot proceed. Please resolve issues above.")
+    else:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            # STEP 1: Extract complete label data
+            status_text.text("📊 Step 1/3: Analyzing complete label..." if language == "English" else "📊 Paso 1/3: Analizando etiqueta completa...")
+            progress_bar.progress(30)
+            
+            image_bytes = uploaded_file.getvalue()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            image_type = uploaded_file.type
+            image_data_url = f"data:{image_type};base64,{base64_image}"
+            
+            openai.api_key = api_key
+            
+            # Extract complete label information
+            extraction_response = openai.ChatCompletion.create(
+                model=model_choice,
+                messages=[
+                    {"role": "system", "content": COMPLETE_LABEL_EXTRACTION_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract all label information as JSON"},
+                            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "high"}}
+                        ]
+                    }
+                ],
+                max_tokens=2000,
+                temperature=0.0
+            )
+            
+            status_text.text("✅ Label data extracted!" if language == "English" else "✅ ¡Datos de etiqueta extraídos!")
+            progress_bar.progress(60)
+            
+            # Parse JSON
+            data_text = extraction_response['choices'][0]['message']['content']
+            data_text = data_text.replace('```json', '').replace('```', '').strip()
+            label_data = json.loads(data_text)
+            
+            # STEP 2: Validate complete compliance
+            status_text.text("🔍 Step 2/3: Checking FDA compliance..." if language == "English" else "🔍 Paso 2/3: Verificando cumplimiento FDA...")
+            progress_bar.progress(80)
+            
+            validator = CompleteLabelValidator()
+            compliance_report = validator.validate_complete_label(label_data)
+            
+            status_text.text("✅ Complete analysis done!" if language == "English" else "✅ ¡Análisis completo terminado!")
+            progress_bar.progress(100)
+            
+            # DISPLAY RESULTS
+            st.markdown("---")
+            
+            # Compliance Score Header
+            score = compliance_report['compliance_score']
+            status = compliance_report['status']
+            
+            if score >= 90:
+                score_color = "#28a745"
+                emoji = "🎉"
+            elif score >= 70:
+                score_color = "#ffc107"
+                emoji = "⚠️"
+            else:
+                score_color = "#dc3545"
+                emoji = "❌"
+            
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, {score_color}22, {score_color}11); 
+                        border-left: 6px solid {score_color}; padding: 2rem; border-radius: 10px; margin: 1rem 0;">
+                <h1 style="margin:0; color: {score_color};">{emoji} {status}</h1>
+                <h2 style="margin: 0.5rem 0 0 0; color: #333;">Compliance Score: {score}/100</h2>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show label preview
+            col_preview1, col_preview2 = st.columns([1, 1])
+            
+            with col_preview1:
+                st.subheader("📋 Your Current Label")
+                st.image(uploaded_file, use_column_width=True)
+            
+            with col_preview2:
+                st.subheader("📊 Extracted Information")
+                
+                with st.expander("🏷️ Principal Display Panel", expanded=True):
+                    pdp = label_data.get('principal_display_panel', {})
+                    st.write(f"**Product Name:** {pdp.get('product_name', 'Not detected')}")
+                    st.write(f"**Brand:** {pdp.get('brand_name', 'N/A')}")
+                    st.write(f"**Net Quantity:** {pdp.get('net_quantity', 'Not detected')}")
+                    if pdp.get('product_claims'):
+                        st.write(f"**Claims:** {', '.join(pdp['product_claims'])}")
+                
+                with st.expander("📝 Information Panel"):
+                    info = label_data.get('information_panel', {})
+                    st.write(f"**Manufacturer:** {info.get('manufacturer_name', 'Not detected')}")
+                    if info.get('ingredient_list'):
+                        st.write(f"**Ingredients:** {info['ingredient_list'][:100]}...")
+                    if info.get('allergen_statement'):
+                        st.write(f"**Allergens:** {info['allergen_statement']}")
+            
+            # Detailed Compliance Report
+            st.markdown("---")
+            st.subheader("📋 Detailed Compliance Report")
+            
+            issues = compliance_report['issues']
+            
+            # Critical Issues
+            if issues['critical']:
+                with st.expander(f"🚨 CRITICAL ISSUES ({len(issues['critical'])})", expanded=True):
+                    st.error("**These issues will prevent US market entry:**")
+                    for idx, issue in enumerate(issues['critical'], 1):
+                        st.markdown(f"""
+                        **{idx}. {issue['requirement']}**
+                        - **Issue:** {issue['issue']}
+                        - **Regulation:** {issue['regulation']}
+                        - **Fix:** {issue['fix']}
+                        """)
+                        st.markdown("---")
+            
+            # Major Issues
+            if issues['major']:
+                with st.expander(f"⚠️ MAJOR ISSUES ({len(issues['major'])})", expanded=True):
+                    st.warning("**Address these before launching in US market:**")
+                    for idx, issue in enumerate(issues['major'], 1):
+                        st.markdown(f"""
+                        **{idx}. {issue['requirement']}**
+                        - **Issue:** {issue['issue']}
+                        - **Regulation:** {issue['regulation']}
+                        - **Fix:** {issue['fix']}
+                        """)
+                        st.markdown("---")
+            
+            # Minor Issues
+            if issues['minor']:
+                with st.expander(f"💡 MINOR IMPROVEMENTS ({len(issues['minor'])})"):
+                    st.info("**Optional improvements for best practices:**")
+                    for idx, issue in enumerate(issues['minor'], 1):
+                        st.markdown(f"**{idx}.** {issue['requirement']}: {issue['fix']}")
+            
+            # Passed Checks
+            if issues['passed']:
+                with st.expander(f"✅ PASSED CHECKS ({len(issues['passed'])})"):
+                    st.success("**Your label meets these requirements:**")
+                    for check in issues['passed']:
+                        st.markdown(f"- {check}")
+            
+            # Allergen Analysis
+            if compliance_report.get('detected_allergens'):
+                st.markdown("---")
+                st.subheader("🔍 Allergen Detection")
+                
+                detected = compliance_report['detected_allergens']
+                
+                col_allergen1, col_allergen2 = st.columns(2)
+                
+                with col_allergen1:
+                    st.write("**Detected Allergens:**")
+                    for allergen_type, ingredients in detected.items():
+                        allergen_name = allergen_type.replace('_', ' ').title()
+                        st.write(f"- **{allergen_name}:** {', '.join(ingredients[:3])}")
+                
+                with col_allergen2:
+                    info = label_data.get('information_panel', {})
+                    if info.get('allergen_statement'):
+                        st.write("**Current Declaration:**")
+                        st.info(info['allergen_statement'])
+                    else:
+                        st.warning("**⚠️ No CONTAINS statement found**")
+            
+            # Priority Action Items
+            st.markdown("---")
+            st.subheader("🎯 Priority Action Items")
+            
+            if issues['critical']:
+                st.error(f"""
+                **IMMEDIATE ACTION REQUIRED:**
+                1. Fix all {len(issues['critical'])} critical issues listed above
+                2. These issues will prevent customs clearance
+                3. Estimated time to fix: 2-4 hours with designer
+                4. Cost to fix: $200-500 (design work)
+                """)
+            elif issues['major']:
+                st.warning(f"""
+                **ACTION RECOMMENDED:**
+                1. Address {len(issues['major'])} major issues before launch
+                2. These ensure FDA compliance
+                3. Estimated time: 1-2 hours
+                4. Cost: $100-300
+                """)
+            else:
+                st.success("""
+                **🎉 CONGRATULATIONS!**
+                Your label is FDA-compliant and ready for the US market!
+                
+                **Next Steps:**
+                1. Download compliance report below
+                2. Have packaging printed
+                3. Submit FDA registration (if required)
+                4. Begin US distribution!
+                """)
+            
+            # Cost Savings
+            st.markdown("---")
+            consultant_cost = 8000 if issues['critical'] else 5000
+            time_saved = 4 if issues['critical'] else 2
+            
+            st.markdown(f"""
+            <div class="savings-badge">
+                <h3 style="margin:0;">💰 You Saved</h3>
+                <h2 style="margin:0.5rem 0;">${consultant_cost - 99} USD • {time_saved} weeks</h2>
+                <p style="margin:0;">vs hiring FDA consultant for complete label review</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Download Options
+            st.markdown("---")
+            st.subheader("📥 Download Complete Report")
+            
+            col_dl1, col_dl2 = st.columns(2)
+            
+            with col_dl1:
+                # Generate detailed report
+                report_text = f"""COMPLETE FDA LABEL COMPLIANCE REPORT
+{'='*70}
+
+Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Origin: {origin_country}
+Compliance Score: {score}/100
+Status: {status}
+
+{'='*70}
+PRODUCT INFORMATION
+{'='*70}
+
+Product Name: {label_data.get('principal_display_panel', {}).get('product_name', 'N/A')}
+Brand: {label_data.get('principal_display_panel', {}).get('brand_name', 'N/A')}
+Net Quantity: {label_data.get('principal_display_panel', {}).get('net_quantity', 'N/A')}
+
+{'='*70}
+COMPLIANCE SUMMARY
+{'='*70}
+
+Critical Issues: {len(issues['critical'])}
+Major Issues: {len(issues['major'])}
+Minor Issues: {len(issues['minor'])}
+Passed Checks: {len(issues['passed'])}
+
+{'='*70}
+CRITICAL ISSUES (MUST FIX)
+{'='*70}
+
+"""
+                for idx, issue in enumerate(issues['critical'], 1):
+                    report_text += f"""
+{idx}. {issue['requirement']}
+   Issue: {issue['issue']}
+   Regulation: {issue['regulation']}
+   Fix: {issue['fix']}
+"""
+                
+                if issues['major']:
+                    report_text += f"""
+{'='*70}
+MAJOR ISSUES (RECOMMENDED)
+{'='*70}
+
+"""
+                    for idx, issue in enumerate(issues['major'], 1):
+                        report_text += f"""
+{idx}. {issue['requirement']}
+   Issue: {issue['issue']}
+   Fix: {issue['fix']}
+"""
+                
+                report_text += f"""
+{'='*70}
+COST SAVINGS
+{'='*70}
+
+Consultant Cost: ${consultant_cost}
+VeriLabel Cost: $99
+You Saved: ${consultant_cost - 99}
+
+Time Savings: {time_saved} weeks
+
+{'='*70}
+Generated by VeriLabel Complete - FDA Compliance Platform
+"""
+                
+                st.download_button(
+                    "📄 Download Full Report (TXT)",
+                    data=report_text,
+                    file_name=f"FDA_Complete_Compliance_{datetime.now().strftime('%Y%m%d')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+            
+            with col_dl2:
+                # JSON data
+                full_data = {
+                    'compliance_report': compliance_report,
+                    'extracted_label_data': label_data,
+                    'analysis_date': datetime.now().isoformat(),
+                    'origin_country': origin_country
+                }
+                
+                st.download_button(
+                    "📊 Download Data (JSON)",
+                    data=json.dumps(full_data, indent=2, ensure_ascii=False),
+                    file_name=f"FDA_Compliance_Data_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+        except json.JSONDecodeError:
+            progress_bar.empty()
+            status_text.empty()
+            st.error("❌ Could not parse label data")
+            with st.expander("🔍 Debug Info"):
+                st.code(data_text)
+                
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ Analysis failed: {str(e)}")
+            with st.expander("🔍 Error Details"):
+                import traceback
+                st.code(traceback.format_exc())
+
+# ============================================================================
+# AUDIT ENGINE (Original functionality continues)
+
 st.markdown("---")
-st.caption("🌎 Helping LATAM food exporters succeed in the US market | © 2026 v2.0 - PERFECT FDA FORMAT")
+st.caption("🌎 Complete FDA Compliance Platform for International Exporters | © 2026 VeriLabel v3.0")
