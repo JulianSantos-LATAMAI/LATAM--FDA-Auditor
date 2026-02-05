@@ -1646,9 +1646,78 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
                 
                 added_sugars_raw = nutrition.get('added_sugars_g', '0')
                 sugar_alcohols_raw = nutrition.get('sugar_alcohols_g', '0')
+                total_sugars_raw = nutrition.get('total_sugars_g', '0')
                 
                 try:
                     added_sugars_val = float(added_sugars_raw) if added_sugars_raw else 0
+                    sugar_alcohols_val = float(sugar_alcohols_raw) if sugar_alcohols_raw else 0
+                    total_sugars_val = float(total_sugars_raw) if total_sugars_raw else 0
+                except:
+                    added_sugars_val = 0
+                    sugar_alcohols_val = 0
+                    total_sugars_val = 0
+                
+                st.warning(f"📊 **AI Extracted:** Total Sugars = {total_sugars_val}g, Added Sugars = {added_sugars_val}g, Sugar Alcohols = {sugar_alcohols_val}g")
+                
+                # SPECIAL CHECK: If polyols detected but added sugars matches polyol amount
+                if added_sugars_val > 0 and sugar_alcohols_val > 0:
+                    if abs(added_sugars_val - sugar_alcohols_val) < 0.1:
+                        st.error("🚨 **AI CONFUSION DETECTED!**")
+                        st.error(f"❌ AI set BOTH Added Sugars AND Sugar Alcohols to {added_sugars_val}g")
+                        st.error("🔧 **This is the same value duplicated! One must be wrong.**")
+                        st.success(f"✅ **CORRECTION:** Polyols = {added_sugars_val}g, Added Sugars = 0g")
+                        
+                        # Keep polyols, zero out added sugars
+                        nutrition['added_sugars_g'] = '0'
+                
+                # CRITICAL VALIDATION: Added sugars cannot exceed total sugars!
+                elif added_sugars_val > total_sugars_val and added_sugars_val > 0:
+                    st.error("🚨 **IMPOSSIBLE VALUES DETECTED!**")
+                    st.error(f"❌ Added Sugars ({added_sugars_val}g) CANNOT be greater than Total Sugars ({total_sugars_val}g)")
+                    st.error("🔧 **This is mathematically impossible - the label or AI extraction is wrong!**")
+                    st.error("")
+                    st.error("💡 **DIAGNOSIS:** Product contains polyols. The {:.0f}g is likely the polyol amount, NOT added sugars!".format(added_sugars_val))
+                    
+                    # Auto-correct: Move added sugars to sugar alcohols
+                    st.success(f"✅ **AUTO-CORRECTION:** Moving {added_sugars_val}g to Sugar Alcohols")
+                    st.success("✅ **AUTO-CORRECTION:** Setting Added Sugars to 0g")
+                    
+                    nutrition['sugar_alcohols_g'] = str(added_sugars_val)
+                    nutrition['added_sugars_g'] = '0'
+                    
+                    st.success(f"✅ **CORRECTED VALUES:** Total Sugars = {total_sugars_val}g, Added Sugars = 0g, Sugar Alcohols = {added_sugars_val}g")
+                
+                # CORRECTION LOGIC: If added sugars > 0 and product has polyols
+                elif added_sugars_val > 0:
+                    st.error(f"❌ **ERROR DETECTED:** AI classified {added_sugars_val}g as 'Added Sugars'")
+                    st.error("🔧 **CORRECTING NOW:** Polyols are NOT added sugars!")
+                    
+                    # Check if there's ACTUAL sugar in ingredients (not polyols)
+                    real_sugar_keywords = [
+                        'sugar', 'azúcar', 'sucrose', 'sacarosa',
+                        'corn syrup', 'jarabe de maíz', 'high fructose',
+                        'honey', 'miel', 'glucose', 'glucosa', 'fructose', 'fructosa',
+                        'dextrose', 'dextrosa', 'brown sugar', 'cane sugar',
+                        'agave', 'maple syrup'
+                    ]
+                    
+                    has_real_sugar = any(kw in ingredients_combined for kw in real_sugar_keywords)
+                    
+                    if not has_real_sugar:
+                        # Product ONLY has polyols, no real sugar
+                        st.success(f"✅ **CORRECTION:** Moving {added_sugars_val}g to Sugar Alcohols")
+                        st.success("✅ **CORRECTION:** Setting Added Sugars to 0g")
+                        
+                        # Apply correction
+                        nutrition['sugar_alcohols_g'] = str(added_sugars_val)
+                        nutrition['added_sugars_g'] = '0'
+                        
+                        st.success("✅ **FIXED:** Added Sugars = 0g, Sugar Alcohols = " + str(added_sugars_val) + "g")
+                    else:
+                        st.warning("⚠️ Product contains BOTH polyols AND real sugar")
+                        st.warning("⚠️ Keeping current values but flagging for manual review")
+                else:
+                    st.success(f"✅ Added Sugars already 0g - correct!")
                     sugar_alcohols_val = float(sugar_alcohols_raw) if sugar_alcohols_raw else 0
                 except:
                     added_sugars_val = 0
