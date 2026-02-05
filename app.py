@@ -1617,6 +1617,46 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             data_text = data_text.replace('```json', '').replace('```', '').strip()
             label_data = json.loads(data_text)
             
+            # ===== POST-EXTRACTION CORRECTION: FIX POLYOL CONFUSION =====
+            nutrition = label_data.get('nutrition_facts', {})
+            ingredients = (label_data.get('information_panel', {}).get('ingredient_list_english') or 
+                          label_data.get('information_panel', {}).get('ingredient_list_original', '')).lower()
+            
+            # Detect polyols in ingredients
+            polyol_keywords = ['maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 
+                              'lactitol', 'polioles', 'polyols', 'polialcoholes', 'jarabe de maltitol',
+                              'maltitol syrup', 'sugar alcohol']
+            has_polyols = any(keyword in ingredients for keyword in polyol_keywords)
+            
+            if has_polyols:
+                st.info("🔍 Polyols detected in ingredients - applying correction logic...")
+                
+                added_sugars = nutrition.get('added_sugars_g')
+                sugar_alcohols = nutrition.get('sugar_alcohols_g')
+                
+                # If added sugars is high but product has polyols, likely misclassified
+                if added_sugars and float(added_sugars) > 5:
+                    st.warning(f"⚠️ AI extracted {added_sugars}g as 'added sugars' but product contains polyols (sugar alcohols)")
+                    st.warning("🔧 CORRECTING: Polyols are NOT added sugars per FDA regulations")
+                    
+                    # Move the value to sugar alcohols
+                    if not sugar_alcohols or float(sugar_alcohols) == 0:
+                        nutrition['sugar_alcohols_g'] = added_sugars
+                        st.success(f"✅ Moved {added_sugars}g from 'Added Sugars' → 'Sugar Alcohols'")
+                    
+                    # Set added sugars to 0 (unless there's actual sugar in ingredients)
+                    sugar_keywords = ['sugar', 'azúcar', 'corn syrup', 'jarabe de maíz', 'honey', 
+                                    'miel', 'syrup', 'jarabe', 'fructose', 'glucose']
+                    has_real_sugar = any(keyword in ingredients for keyword in sugar_keywords)
+                    
+                    if not has_real_sugar:
+                        nutrition['added_sugars_g'] = '0'
+                        st.success("✅ Set 'Added Sugars' to 0g (product sweetened only with polyols)")
+                    else:
+                        st.warning("⚠️ Product may have BOTH sugar and polyols - manual verification recommended")
+                
+                label_data['nutrition_facts'] = nutrition
+            
             # STEP 2: Validate complete compliance
             status_text.text("🔍 Step 2/3: Checking FDA compliance..." if language == "English" else "🔍 Paso 2/3: Verificando cumplimiento FDA...")
             progress_bar.progress(80)
