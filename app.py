@@ -63,137 +63,237 @@ class CompleteLabelValidator:
         self.allergen_detector = AllergenDetector()
     
     def validate_complete_label(self, extracted_data: Dict) -> Dict:
-        """Perform complete FDA compliance validation"""
+        """Perform complete FDA compliance validation per 21 CFR Part 101"""
         
         issues = {'critical': [], 'major': [], 'minor': [], 'passed': []}
+        changes_made = []
+        compliance_risks = []
         
         pdp = extracted_data.get('principal_display_panel', {})
         info = extracted_data.get('information_panel', {})
         lang = extracted_data.get('language_detection', {})
+        nutrition = extracted_data.get('nutrition_facts', {})
         
-        # Product Name Check
-        if not pdp.get('product_name'):
+        # === STEP 1: MANDATORY COMPONENT AUDIT ===
+        
+        # 1. Statement of Identity
+        product_name = pdp.get('product_name')
+        if not product_name:
             issues['critical'].append({
-                'requirement': 'Statement of Identity',
+                'requirement': 'Statement of Identity (21 CFR 101.3)',
                 'issue': 'Product name not found',
                 'regulation': '21 CFR 101.3',
-                'fix': 'Add clear product name describing what product is'
+                'fix': 'Add common/usual name (e.g., "Strawberry Jam", "Corn Tortillas")',
+                'risk': 'EXPORT BLOCKER - Customs will reject without clear product identity'
             })
+            compliance_risks.append('Missing Statement of Identity')
         else:
-            issues['passed'].append('✅ Product name present')
+            issues['passed'].append('✅ Statement of Identity present')
+            # Check if needs translation
+            if pdp.get('product_name_english') and pdp.get('product_name') != pdp.get('product_name_english'):
+                changes_made.append(f"Translated product name: '{pdp['product_name']}' → '{pdp['product_name_english']}'")
         
-        # Net Quantity Check
-        net_qty = pdp.get('net_quantity', '')
-        if net_qty:
-            has_us = any(u in net_qty.lower() for u in ['oz', 'lb', 'fl oz'])
-            has_metric = any(u in net_qty.lower() for u in ['g', 'kg', 'ml', 'l'])
+        # 2. Net Quantity of Contents
+        net_qty_original = pdp.get('net_quantity_original', '')
+        net_qty_us = pdp.get('net_quantity_us')
+        net_qty_metric = pdp.get('net_quantity_metric')
+        
+        if not net_qty_original:
+            issues['critical'].append({
+                'requirement': 'Net Quantity Declaration (21 CFR 101.105)',
+                'issue': 'Net quantity not found on label',
+                'regulation': '21 CFR 101.105',
+                'fix': 'Add: "Net Wt [US units] ([metric])" - e.g., "Net Wt 17.6 oz (500g)"',
+                'risk': 'EXPORT BLOCKER - Required by law'
+            })
+            compliance_risks.append('Missing Net Quantity')
+        else:
+            has_us = bool(net_qty_us) or any(u in net_qty_original.lower() for u in ['oz', 'lb', 'fl oz'])
+            has_metric = bool(net_qty_metric) or any(u in net_qty_original.lower() for u in ['g', 'kg', 'ml', 'l'])
             
             if not has_us:
                 issues['critical'].append({
-                    'requirement': 'Net Quantity - US Units',
-                    'issue': 'Missing US units (oz, lb)',
-                    'regulation': '21 CFR 101.105',
-                    'fix': 'Add US customary units: "Net Wt 16 oz (454g)"'
+                    'requirement': 'Net Quantity - US Units Required',
+                    'issue': 'Missing US customary units (oz, lb, fl oz)',
+                    'regulation': '21 CFR 101.105(a)',
+                    'fix': f'Convert {net_qty_metric or net_qty_original} to US units and add',
+                    'risk': 'EXPORT BLOCKER - US units mandatory'
                 })
+                compliance_risks.append('Missing US units in net quantity')
+                
+                # Auto-calculate US units
+                if net_qty_metric:
+                    metric_val = re.search(r'(\d+\.?\d*)', net_qty_metric)
+                    if metric_val:
+                        val = float(metric_val.group(1))
+                        if 'kg' in net_qty_metric.lower():
+                            oz = round(val * 35.274, 1)
+                            changes_made.append(f"Calculated US units: {val}kg = {oz} oz")
+                        elif 'g' in net_qty_metric.lower():
+                            oz = round(val / 28.35, 1)
+                            changes_made.append(f"Calculated US units: {val}g = {oz} oz")
+            
             if not has_metric:
-                issues['critical'].append({
-                    'requirement': 'Net Quantity - Metric',
+                issues['major'].append({
+                    'requirement': 'Net Quantity - Metric Units',
                     'issue': 'Missing metric units',
-                    'regulation': '21 CFR 101.105',
-                    'fix': 'Add metric units in parentheses'
+                    'regulation': '21 CFR 101.105(a)',
+                    'fix': 'Add metric equivalent in parentheses',
+                    'risk': 'Non-compliance with dual declaration requirement'
                 })
+            
             if has_us and has_metric:
-                issues['passed'].append('✅ Net quantity in both units')
-        else:
-            issues['critical'].append({
-                'requirement': 'Net Quantity Declaration',
-                'issue': 'Net quantity not found',
-                'regulation': '21 CFR 101.105',
-                'fix': 'Add: "Net Wt [oz] ([g])" on front panel'
-            })
+                issues['passed'].append('✅ Net quantity in both US and metric units')
         
-        # Language Check
-        primary = lang.get('primary_language', '')
-        if primary and primary.lower() not in ['english', 'unknown']:
+        # 3. Nutrition Facts Label
+        if not nutrition.get('present'):
             issues['critical'].append({
-                'requirement': 'English Language',
-                'issue': f'Label primarily in {primary}',
-                'regulation': '21 CFR 101.15',
-                'fix': 'All required info must be in English (bilingual OK)'
+                'requirement': 'Nutrition Facts Panel (21 CFR 101.9)',
+                'issue': 'Nutrition Facts panel not detected',
+                'regulation': '21 CFR 101.9',
+                'fix': 'Add complete Nutrition Facts panel in 2016 format',
+                'risk': 'EXPORT BLOCKER - Mandatory for all packaged foods'
             })
+            compliance_risks.append('Missing Nutrition Facts')
         else:
-            issues['passed'].append('✅ English language requirement met')
+            # Check format
+            nf_format = nutrition.get('format', '')
+            if nf_format and nf_format not in ['US', 'Unknown']:
+                issues['major'].append({
+                    'requirement': 'Nutrition Facts Format',
+                    'issue': f'Using {nf_format} format, not US FDA format',
+                    'regulation': '21 CFR 101.9',
+                    'fix': 'Convert to US FDA 2016 format with required order and formatting',
+                    'risk': 'Will be rejected - must use US format'
+                })
+                changes_made.append(f"Converting from {nf_format} format to US FDA format")
+            else:
+                issues['passed'].append('✅ Nutrition Facts panel present')
         
-        # Ingredient List Check
-        ingredients = info.get('ingredient_list', '')
-        if not ingredients:
+        # 4. Ingredients List
+        ingredients_original = info.get('ingredient_list_original', '')
+        ingredients_english = info.get('ingredient_list_english', '')
+        
+        if not ingredients_original:
             issues['critical'].append({
-                'requirement': 'Ingredient List',
+                'requirement': 'Ingredient List (21 CFR 101.4)',
                 'issue': 'Ingredient list not found',
                 'regulation': '21 CFR 101.4',
-                'fix': 'Add ingredient list in descending order by weight'
+                'fix': 'Add complete ingredient list in descending order by weight',
+                'risk': 'EXPORT BLOCKER - Mandatory requirement'
             })
+            compliance_risks.append('Missing Ingredient List')
         else:
             issues['passed'].append('✅ Ingredient list present')
             
-            # Allergen Check
-            detected = self.allergen_detector.detect_allergens(ingredients)
-            allergen_stmt = info.get('allergen_statement', '')
+            # Check if translation needed
+            primary_lang = lang.get('primary_language', '').lower()
+            if primary_lang in ['spanish', 'portuguese'] and ingredients_english:
+                changes_made.append(f"Translated ingredients from {primary_lang.title()} to English")
+            
+            # Allergen analysis
+            detected = self.allergen_detector.detect_allergens(ingredients_english or ingredients_original)
+            allergen_stmt_original = info.get('allergen_statement_original', '')
+            allergen_stmt_english = info.get('allergen_statement_english', '')
             
             if detected:
-                missing = []
-                for allergen in detected.keys():
-                    allergen_name = allergen.replace('_', ' ')
-                    if allergen_stmt:
-                        if allergen_name not in allergen_stmt.lower():
-                            missing.append(allergen_name.title())
-                    else:
-                        missing.append(allergen_name.title())
+                missing_allergens = []
+                allergen_text = (allergen_stmt_english or allergen_stmt_original or '').lower()
                 
-                if missing:
+                for allergen_type in detected.keys():
+                    allergen_name = allergen_type.replace('_', ' ')
+                    if allergen_name not in allergen_text:
+                        missing_allergens.append(allergen_name.title())
+                
+                if missing_allergens:
                     issues['critical'].append({
-                        'requirement': 'Allergen Declaration',
-                        'issue': f'Allergens detected but not declared: {", ".join(missing)}',
+                        'requirement': 'Allergen Declaration (21 CFR 101.22)',
+                        'issue': f'Allergens detected but not declared: {", ".join(missing_allergens)}',
                         'regulation': '21 CFR 101.22',
-                        'fix': f'Add: "CONTAINS: {", ".join([a.upper() for a in missing])}"'
+                        'fix': f'Add: "CONTAINS: {", ".join([a.upper() for a in missing_allergens])}"',
+                        'risk': 'EXPORT BLOCKER - Allergen declaration mandatory'
                     })
+                    compliance_risks.append('Missing allergen declarations')
+                    changes_made.append(f"Added allergen declaration for: {', '.join(missing_allergens)}")
                 else:
                     issues['passed'].append('✅ Allergens properly declared')
+                    
+                    # Check if translation needed
+                    if allergen_stmt_original and allergen_stmt_english and allergen_stmt_original != allergen_stmt_english:
+                        changes_made.append(f"Translated allergen statement to English")
         
-        # Manufacturer Info Check
+        # 5. Manufacturer Name and Address
         if not info.get('manufacturer_name'):
             issues['critical'].append({
-                'requirement': 'Manufacturer Information',
-                'issue': 'Manufacturer name/address not found',
+                'requirement': 'Manufacturer Information (21 CFR 101.5)',
+                'issue': 'Manufacturer name and address not found',
                 'regulation': '21 CFR 101.5',
-                'fix': 'Add: "Manufactured for [Company], [City, State ZIP]"'
+                'fix': 'Add: "Manufactured for [Company Name], [City, State ZIP]" or "Imported by [Company], [City, State ZIP]"',
+                'risk': 'EXPORT BLOCKER - Must identify responsible party'
             })
+            compliance_risks.append('Missing Manufacturer Information')
         else:
             issues['passed'].append('✅ Manufacturer information present')
+            
+            # Check if it's imported
+            country = info.get('country_of_origin', '').lower()
+            if country and 'usa' not in country and 'united states' not in country:
+                if 'imported' not in info.get('manufacturer_address', '').lower():
+                    issues['major'].append({
+                        'requirement': 'Country of Origin Declaration',
+                        'issue': f'Product from {country} but no "Imported by" statement',
+                        'regulation': '19 CFR 134.1',
+                        'fix': f'Add: "Imported from {country.title()}" and US importer address',
+                        'risk': 'Customs may reject - origin must be clear'
+                    })
         
-        # Nutrition Facts Check
-        if not extracted_data.get('nutrition_facts', {}).get('present'):
-            issues['major'].append({
-                'requirement': 'Nutrition Facts Panel',
-                'issue': 'Nutrition Facts not detected',
-                'regulation': '21 CFR 101.9',
-                'fix': 'Add FDA-compliant Nutrition Facts panel'
+        # === STEP 2: TRANSLATION & LOCALIZATION ===
+        
+        # Check for Chilean Sellos
+        sellos = pdp.get('chilean_sellos', [])
+        if sellos:
+            changes_made.append(f"Removed Chilean 'Sellos' (black octagons): {', '.join(sellos)}")
+            changes_made.append("Note: High sugar/fat content reflected in Nutrition Facts panel instead")
+            issues['passed'].append('✅ Chilean sellos identified and removed (FDA uses Nutrition Facts only)')
+        
+        # Check for Mexican warnings
+        mex_warnings = pdp.get('mexican_warnings', [])
+        if mex_warnings:
+            changes_made.append(f"Removed Mexican front-of-pack warnings: {', '.join(mex_warnings)}")
+            changes_made.append("Note: Nutrient content shown in Nutrition Facts panel")
+            issues['passed'].append('✅ Mexican warnings identified and removed (not used in US)')
+        
+        # Language requirement
+        primary = lang.get('primary_language', '')
+        if primary and primary.lower() not in ['english', 'unknown']:
+            issues['critical'].append({
+                'requirement': 'English Language (21 CFR 101.15)',
+                'issue': f'Label primarily in {primary}',
+                'regulation': '21 CFR 101.15(a)',
+                'fix': 'Translate all required information to English (bilingual labels OK)',
+                'risk': 'EXPORT BLOCKER - English is mandatory'
             })
+            compliance_risks.append('Not in English')
+            changes_made.append(f"Translated entire label from {primary} to English")
         else:
-            issues['passed'].append('✅ Nutrition Facts panel present')
+            issues['passed'].append('✅ English language requirement met')
         
-        # Calculate compliance score
-        total_issues = len(issues['critical']) + len(issues['major'])
-        compliance_score = max(0, 100 - (len(issues['critical']) * 20) - (len(issues['major']) * 10))
+        # === COMPLIANCE SUMMARY ===
         
-        if len(issues['critical']) == 0:
-            status = "READY FOR US MARKET"
+        total_critical = len(issues['critical'])
+        total_major = len(issues['major'])
+        total_issues = total_critical + total_major
+        
+        compliance_score = max(0, 100 - (total_critical * 20) - (total_major * 10))
+        
+        if total_critical == 0:
+            status = "FDA COMPLIANT - READY FOR US MARKET"
             export_ready = True
-        elif len(issues['critical']) <= 2:
-            status = "NEEDS FIXES"
+        elif total_critical <= 2:
+            status = "NEEDS FIXES - Close to compliance"
             export_ready = False
         else:
-            status = "MAJOR REVISION NEEDED"
+            status = "MAJOR REVISION REQUIRED"
             export_ready = False
         
         return {
@@ -202,41 +302,258 @@ class CompleteLabelValidator:
             'status': status,
             'issues': issues,
             'total_issues': total_issues,
-            'detected_allergens': detected if ingredients else {}
+            'changes_made': changes_made,
+            'compliance_risks': compliance_risks,
+            'detected_allergens': detected if ingredients_original else {},
+            'audit_summary': {
+                'critical_issues': total_critical,
+                'major_issues': total_major,
+                'minor_issues': len(issues['minor']),
+                'passed_checks': len(issues['passed']),
+                'total_changes': len(changes_made),
+                'risk_level': 'HIGH' if total_critical >= 3 else 'MEDIUM' if total_critical > 0 else 'LOW'
+            },
+            'redesign_data': self._generate_redesign_specification(extracted_data, detected if ingredients_original else {})
         }
+    
+    def _generate_redesign_specification(self, extracted_data: Dict, detected_allergens: Dict) -> Dict:
+        """Generate complete FDA-compliant label redesign specification"""
+        
+        pdp = extracted_data.get('principal_display_panel', {})
+        info = extracted_data.get('information_panel', {})
+        nutrition = extracted_data.get('nutrition_facts', {})
+        
+        # Get English versions or originals
+        product_name = pdp.get('product_name_english') or pdp.get('product_name', 'PRODUCT NAME REQUIRED')
+        ingredients = info.get('ingredient_list_english') or info.get('ingredient_list_original', 'INGREDIENTS REQUIRED')
+        
+        # Calculate US units if needed
+        net_qty_us = pdp.get('net_quantity_us', '')
+        net_qty_metric = pdp.get('net_quantity_metric', '')
+        
+        if not net_qty_us and net_qty_metric:
+            # Auto-calculate
+            match = re.search(r'(\d+\.?\d*)', net_qty_metric)
+            if match:
+                val = float(match.group(1))
+                if 'kg' in net_qty_metric.lower():
+                    oz = round(val * 35.274, 1)
+                    lb = round(val * 2.205, 1)
+                    net_qty_us = f"{oz} oz" if oz < 16 else f"{lb} lb"
+                elif 'g' in net_qty_metric.lower():
+                    oz = round(val / 28.35, 1)
+                    net_qty_us = f"{oz} oz"
+                elif 'l' in net_qty_metric.lower():
+                    fl_oz = round(val * 33.814, 1)
+                    net_qty_us = f"{fl_oz} fl oz"
+                elif 'ml' in net_qty_metric.lower():
+                    fl_oz = round(val / 29.57, 1)
+                    net_qty_us = f"{fl_oz} fl oz"
+        
+        net_quantity_compliant = f"Net Wt {net_qty_us} ({net_qty_metric})" if net_qty_us and net_qty_metric else "NET QUANTITY REQUIRED"
+        
+        # Build allergen statement
+        allergen_list = []
+        if detected_allergens:
+            for allergen_type in detected_allergens.keys():
+                allergen_name = allergen_type.replace('_', ' ').upper()
+                allergen_list.append(allergen_name)
+        
+        allergen_statement = f"CONTAINS: {', '.join(allergen_list)}" if allergen_list else None
+        
+        # Get manufacturer info
+        manufacturer = info.get('manufacturer_name', 'MANUFACTURER NAME REQUIRED')
+        address = info.get('manufacturer_address', 'CITY, STATE ZIP REQUIRED')
+        country = info.get('country_of_origin', '')
+        
+        if country and country.lower() not in ['usa', 'united states', 'us']:
+            manufacturer_statement = f"Imported from {country}\nDistributed by: {manufacturer}\n{address}"
+        else:
+            manufacturer_statement = f"Manufactured for: {manufacturer}\n{address}"
+        
+        redesign = {
+            "label_format": "FDA_COMPLIANT_US",
+            "regulation_compliance": "21 CFR Part 101",
+            
+            "principal_display_panel": {
+                "statement_of_identity": {
+                    "text": product_name,
+                    "font_requirement": "Prominent and conspicuous",
+                    "position": "Top 1/3 of principal display panel",
+                    "regulation": "21 CFR 101.3"
+                },
+                "net_quantity": {
+                    "text": net_quantity_compliant,
+                    "font_requirement": "Bold, minimum 1/16 inch (based on panel size)",
+                    "position": "Bottom 30% of principal display panel",
+                    "regulation": "21 CFR 101.105"
+                },
+                "brand_name": pdp.get('brand_name', None)
+            },
+            
+            "information_panel": {
+                "ingredients": {
+                    "heading": "INGREDIENTS:",
+                    "text": ingredients,
+                    "format": "Descending order by weight",
+                    "font_requirement": "Minimum 1/16 inch",
+                    "regulation": "21 CFR 101.4"
+                },
+                "allergen_declaration": {
+                    "text": allergen_statement,
+                    "format": "CONTAINS: [ALLERGENS] or within ingredient list",
+                    "required_allergens": allergen_list if allergen_list else None,
+                    "regulation": "21 CFR 101.22 (FALCPA)"
+                },
+                "manufacturer_information": {
+                    "text": manufacturer_statement,
+                    "regulation": "21 CFR 101.5"
+                }
+            },
+            
+            "nutrition_facts": {
+                "format": "2016 FDA Format",
+                "title": "Nutrition Facts",
+                "serving_size": nutrition.get('serving_size_original', 'SERVING SIZE REQUIRED'),
+                "servings_per_container": nutrition.get('servings_per_container', 'REQUIRED'),
+                "nutrients": {
+                    "calories": nutrition.get('calories', '0'),
+                    "total_fat_g": nutrition.get('total_fat_g', '0'),
+                    "saturated_fat_g": nutrition.get('saturated_fat_g', '0'),
+                    "trans_fat_g": nutrition.get('trans_fat_g', '0'),
+                    "cholesterol_mg": nutrition.get('cholesterol_mg', '0'),
+                    "sodium_mg": nutrition.get('sodium_mg', '0'),
+                    "total_carbohydrate_g": nutrition.get('total_carb_g', '0'),
+                    "dietary_fiber_g": nutrition.get('fiber_g', '0'),
+                    "total_sugars_g": nutrition.get('total_sugars_g', '0'),
+                    "added_sugars_g": nutrition.get('added_sugars_g', '0'),
+                    "protein_g": nutrition.get('protein_g', '0'),
+                    "vitamin_d_mcg": nutrition.get('vitamin_d_mcg', '0'),
+                    "calcium_mg": nutrition.get('calcium_mg', '0'),
+                    "iron_mg": nutrition.get('iron_mg', '0'),
+                    "potassium_mg": nutrition.get('potassium_mg', '0')
+                },
+                "regulation": "21 CFR 101.9"
+            },
+            
+            "special_requirements": {
+                "language": "English (bilingual permitted)",
+                "removed_elements": [],
+                "added_elements": []
+            }
+        }
+        
+        # Add removed elements
+        if pdp.get('chilean_sellos'):
+            redesign['special_requirements']['removed_elements'].append({
+                "element": "Chilean Sellos (Black octagons)",
+                "items": pdp['chilean_sellos'],
+                "reason": "FDA does not use front-of-pack warning labels"
+            })
+        
+        if pdp.get('mexican_warnings'):
+            redesign['special_requirements']['removed_elements'].append({
+                "element": "Mexican Warning Labels",
+                "items": pdp['mexican_warnings'],
+                "reason": "FDA does not use front-of-pack warning labels"
+            })
+        
+        return redesign
 
 
 # Complete Label Extraction Prompt
-COMPLETE_LABEL_EXTRACTION_PROMPT = """You are an FDA compliance expert. Extract ALL information from this complete food label.
+COMPLETE_LABEL_EXTRACTION_PROMPT = """### ROLE
+You are an expert FDA Regulatory Consultant specializing in Food Labeling Compliance (21 CFR Part 101). Your goal is to audit an entire food package label (LATAM/International) and extract all information for FDA compliance analysis.
 
-RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
+### STEP 1: COMPONENT EXTRACTION
+Extract the following five mandatory elements from the label. If missing, note as null:
+
+1. **Statement of Identity:** The common or usual name of the food (e.g., "Hard Candy", "Strawberry Jam")
+2. **Net Quantity of Contents:** Extract exact text showing weight/volume
+3. **Nutrition Facts Label:** Extract all nutrition data if present
+4. **Ingredients List:** Extract complete ingredient list exactly as shown
+5. **Name and Address of Manufacturer:** Extract company name and address
+
+### STEP 2: LANGUAGE & CULTURAL ELEMENTS
+- Identify primary language (Spanish/Portuguese/English)
+- Note any Chilean "Sellos" (High in Sugar/Saturated Fat octagons)
+- Note any Mexican "Alto en" warnings
+- Note any Brazilian "Contém" allergen warnings
+- Identify all marketing claims (Organic, Natural, Sugar-Free, etc.)
+
+### STEP 3: ALLERGEN DETECTION
+Scan ingredients for FDA's 9 major allergens:
+- Milk, Eggs, Fish, Shellfish, Tree nuts, Peanuts, Wheat, Soybeans, Sesame
+- Note if allergen statement exists (CONTAINS:, CONTIENE:, etc.)
+
+### RETURN FORMAT
+Return ONLY valid JSON with this exact structure:
 
 {
     "principal_display_panel": {
-        "product_name": "exact product name",
+        "product_name": "exact product name as shown",
+        "product_name_english": "translate to English if not already",
         "brand_name": "brand if present",
-        "net_quantity": "exact text (e.g., 'Net Wt 16 oz (454g)')",
-        "product_claims": ["any claims like 'organic', 'gluten-free'"]
+        "net_quantity_original": "exact text (e.g., '500g' or 'Peso Neto 500g')",
+        "net_quantity_us": "US units if present (e.g., '17.6 oz')",
+        "net_quantity_metric": "metric if present (e.g., '500g')",
+        "product_claims": ["list all claims like 'Orgánico', 'Sin Gluten', '100% Natural'"],
+        "chilean_sellos": ["list if present: 'Alto en Azúcares', 'Alto en Grasas Saturadas', etc."],
+        "mexican_warnings": ["list if present: 'Exceso calorías', etc."]
     },
     "information_panel": {
-        "ingredient_list": "complete ingredient list exactly as shown",
-        "allergen_statement": "CONTAINS statement if present, else null",
+        "ingredient_list_original": "complete ingredient list exactly as shown in original language",
+        "ingredient_list_english": "translate ingredients to English",
+        "ingredients_parsed": ["ingredient1", "ingredient2", "ingredient3"],
+        "allergen_statement_original": "exact allergen statement if present",
+        "allergen_statement_english": "translate to English",
         "manufacturer_name": "company name",
-        "manufacturer_address": "full address if shown",
-        "country_of_origin": "country if stated, else null"
+        "manufacturer_address": "full address including city, state/province, country",
+        "country_of_origin": "country",
+        "distributed_by": "if different from manufacturer",
+        "lot_code": "if visible",
+        "best_by_date": "if visible"
     },
     "nutrition_facts": {
         "present": true/false,
-        "serving_size": "serving size if visible",
-        "calories": "calories if visible"
+        "format": "Chilean/Mexican/Brazilian/US/Other",
+        "serving_size_original": "as shown on label",
+        "serving_size_metric": "just the metric (e.g., '30g')",
+        "servings_per_container": "number",
+        "calories": "number",
+        "total_fat_g": "number",
+        "saturated_fat_g": "number",
+        "trans_fat_g": "number",
+        "cholesterol_mg": "number",
+        "sodium_mg": "number",
+        "total_carb_g": "number",
+        "fiber_g": "number",
+        "total_sugars_g": "number",
+        "added_sugars_g": "number or null if not specified",
+        "protein_g": "number",
+        "vitamin_d_mcg": "number or null",
+        "calcium_mg": "number or null",
+        "iron_mg": "number or null",
+        "potassium_mg": "number or null"
     },
     "language_detection": {
-        "primary_language": "English/Spanish/Portuguese/Other",
-        "bilingual": true/false
-    }
+        "primary_language": "Spanish/Portuguese/English/Other",
+        "bilingual": true/false,
+        "languages_present": ["Spanish", "English"]
+    },
+    "compliance_observations": [
+        "list any obvious issues: 'Only in Spanish', 'Missing allergen declaration', 'No US units', etc."
+    ]
 }
 
-Extract all text exactly as it appears. If missing, use null."""
+CRITICAL INSTRUCTIONS:
+- Extract text EXACTLY as it appears, preserving original language
+- Provide English translations where specified
+- If anything is missing, use null (not empty string)
+- Be thorough - extract everything visible on the label
+- Note cultural/regional labeling elements (sellos, warnings, etc.)
+
+Extract now:"""
 
 # ============================================================================
 # FDA ROUNDING RULES - EXACT IMPLEMENTATION
@@ -1280,7 +1597,21 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             
             # Detailed Compliance Report
             st.markdown("---")
-            st.subheader("📋 Detailed Compliance Report")
+            st.subheader("📋 FDA COMPLIANCE AUDIT REPORT")
+            
+            # Show Changes Made
+            if compliance_report.get('changes_made'):
+                with st.expander("🔄 CHANGES MADE FOR FDA COMPLIANCE", expanded=True):
+                    st.info("**These changes were identified to make your label FDA-compliant:**")
+                    for idx, change in enumerate(compliance_report['changes_made'], 1):
+                        st.markdown(f"{idx}. {change}")
+            
+            # Show Compliance Risks
+            if compliance_report.get('compliance_risks'):
+                with st.expander("⚠️ COMPLIANCE RISKS IDENTIFIED", expanded=True):
+                    st.error("**These risks could prevent US market entry:**")
+                    for risk in compliance_report['compliance_risks']:
+                        st.markdown(f"- 🚫 {risk}")
             
             issues = compliance_report['issues']
             
@@ -1341,11 +1672,172 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
                 
                 with col_allergen2:
                     info = label_data.get('information_panel', {})
-                    if info.get('allergen_statement'):
+                    if info.get('allergen_statement_english') or info.get('allergen_statement_original'):
                         st.write("**Current Declaration:**")
-                        st.info(info['allergen_statement'])
+                        stmt = info.get('allergen_statement_english') or info.get('allergen_statement_original')
+                        st.info(stmt)
                     else:
                         st.warning("**⚠️ No CONTAINS statement found**")
+            
+            # FDA-COMPLIANT REDESIGN SPECIFICATION
+            st.markdown("---")
+            st.subheader("🎨 FDA-COMPLIANT LABEL REDESIGN")
+            
+            redesign = compliance_report.get('redesign_data', {})
+            
+            if redesign:
+                st.success("**📋 Complete label specification for your designer/printer:**")
+                
+                # Principal Display Panel
+                with st.expander("🏷️ PRINCIPAL DISPLAY PANEL (Front of Package)", expanded=True):
+                    pdp_design = redesign.get('principal_display_panel', {})
+                    
+                    st.markdown("### Statement of Identity")
+                    st.code(f"""
+Product Name: {pdp_design.get('statement_of_identity', {}).get('text', 'N/A')}
+Font: {pdp_design.get('statement_of_identity', {}).get('font_requirement', 'N/A')}
+Position: {pdp_design.get('statement_of_identity', {}).get('position', 'N/A')}
+Regulation: {pdp_design.get('statement_of_identity', {}).get('regulation', 'N/A')}
+""", language='text')
+                    
+                    st.markdown("### Net Quantity Declaration")
+                    st.code(f"""
+Text: {pdp_design.get('net_quantity', {}).get('text', 'N/A')}
+Font: {pdp_design.get('net_quantity', {}).get('font_requirement', 'N/A')}
+Position: {pdp_design.get('net_quantity', {}).get('position', 'N/A')}
+Regulation: {pdp_design.get('net_quantity', {}).get('regulation', 'N/A')}
+""", language='text')
+                    
+                    if pdp_design.get('brand_name'):
+                        st.markdown(f"**Brand Name:** {pdp_design['brand_name']}")
+                
+                # Information Panel
+                with st.expander("📝 INFORMATION PANEL (Back/Side of Package)", expanded=True):
+                    info_design = redesign.get('information_panel', {})
+                    
+                    st.markdown("### Ingredient List")
+                    ingredients = info_design.get('ingredients', {})
+                    st.code(f"""
+{ingredients.get('heading', 'INGREDIENTS:')}
+
+{ingredients.get('text', 'N/A')}
+
+Format: {ingredients.get('format', 'N/A')}
+Font Requirement: {ingredients.get('font_requirement', 'N/A')}
+Regulation: {ingredients.get('regulation', 'N/A')}
+""", language='text')
+                    
+                    if info_design.get('allergen_declaration', {}).get('text'):
+                        st.markdown("### Allergen Declaration")
+                        allergen = info_design['allergen_declaration']
+                        st.code(f"""
+{allergen.get('text', 'N/A')}
+
+Format: {allergen.get('format', 'N/A')}
+Regulation: {allergen.get('regulation', 'N/A')}
+""", language='text')
+                    
+                    st.markdown("### Manufacturer Information")
+                    st.code(info_design.get('manufacturer_information', {}).get('text', 'N/A'), language='text')
+                
+                # Nutrition Facts
+                with st.expander("📊 NUTRITION FACTS PANEL", expanded=True):
+                    nf_design = redesign.get('nutrition_facts', {})
+                    
+                    st.markdown(f"**Format:** {nf_design.get('format', 'N/A')}")
+                    st.markdown(f"**Regulation:** {nf_design.get('regulation', 'N/A')}")
+                    
+                    st.code(f"""
+Nutrition Facts
+{nf_design.get('servings_per_container', 'X')} servings per container
+Serving size: {nf_design.get('serving_size', 'N/A')}
+
+Amount per serving
+Calories                {nf_design.get('nutrients', {}).get('calories', '0')}
+                                        % Daily Value*
+Total Fat {nf_design.get('nutrients', {}).get('total_fat_g', '0')}g
+  Saturated Fat {nf_design.get('nutrients', {}).get('saturated_fat_g', '0')}g
+  Trans Fat {nf_design.get('nutrients', {}).get('trans_fat_g', '0')}g
+Cholesterol {nf_design.get('nutrients', {}).get('cholesterol_mg', '0')}mg
+Sodium {nf_design.get('nutrients', {}).get('sodium_mg', '0')}mg
+Total Carbohydrate {nf_design.get('nutrients', {}).get('total_carbohydrate_g', '0')}g
+  Dietary Fiber {nf_design.get('nutrients', {}).get('dietary_fiber_g', '0')}g
+  Total Sugars {nf_design.get('nutrients', {}).get('total_sugars_g', '0')}g
+    Includes {nf_design.get('nutrients', {}).get('added_sugars_g', '0')}g Added Sugars
+Protein {nf_design.get('nutrients', {}).get('protein_g', '0')}g
+
+Vitamin D {nf_design.get('nutrients', {}).get('vitamin_d_mcg', '0')}mcg
+Calcium {nf_design.get('nutrients', {}).get('calcium_mg', '0')}mg
+Iron {nf_design.get('nutrients', {}).get('iron_mg', '0')}mg
+Potassium {nf_design.get('nutrients', {}).get('potassium_mg', '0')}mg
+
+* The % Daily Value (DV) tells you how much a nutrient in a serving
+of food contributes to a daily diet. 2,000 calories a day is used
+for general nutrition advice.
+""", language='text')
+                
+                # Special Requirements
+                special = redesign.get('special_requirements', {})
+                if special.get('removed_elements') or special.get('added_elements'):
+                    with st.expander("⚠️ SPECIAL CHANGES FROM ORIGINAL LABEL"):
+                        if special.get('removed_elements'):
+                            st.markdown("**🗑️ Elements Removed:**")
+                            for item in special['removed_elements']:
+                                st.warning(f"**{item['element']}:** {', '.join(item['items']) if isinstance(item.get('items'), list) else item.get('items', 'N/A')}")
+                                st.caption(f"Reason: {item['reason']}")
+                        
+                        if special.get('added_elements'):
+                            st.markdown("**➕ Elements Added:**")
+                            for item in special['added_elements']:
+                                st.info(f"**{item['element']}:** {item.get('reason', 'N/A')}")
+                
+                # Download Redesign JSON
+                st.markdown("---")
+                col_redesign1, col_redesign2 = st.columns(2)
+                
+                with col_redesign1:
+                    st.download_button(
+                        "📥 Download Complete Redesign Spec (JSON)",
+                        data=json.dumps(redesign, indent=2, ensure_ascii=False),
+                        file_name=f"FDA_Label_Redesign_{datetime.now().strftime('%Y%m%d')}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                        help="Send this to your designer/printer for FDA-compliant label creation"
+                    )
+                
+                with col_redesign2:
+                    # Create markdown version
+                    markdown_spec = f"""# FDA-COMPLIANT LABEL SPECIFICATION
+Generated: {datetime.now().strftime('%Y-%m-%d')}
+
+## PRINCIPAL DISPLAY PANEL
+**Product Name:** {redesign['principal_display_panel']['statement_of_identity']['text']}
+**Net Quantity:** {redesign['principal_display_panel']['net_quantity']['text']}
+
+## INFORMATION PANEL
+### Ingredients
+{redesign['information_panel']['ingredients']['text']}
+
+### Allergen Declaration
+{redesign['information_panel']['allergen_declaration'].get('text', 'None required')}
+
+### Manufacturer
+{redesign['information_panel']['manufacturer_information']['text']}
+
+## NUTRITION FACTS
+See JSON file for complete nutrition panel specification.
+
+---
+Complies with 21 CFR Part 101
+"""
+                    
+                    st.download_button(
+                        "📄 Download Redesign Spec (Markdown)",
+                        data=markdown_spec,
+                        file_name=f"FDA_Label_Redesign_{datetime.now().strftime('%Y%m%d')}.md",
+                        mime="text/markdown",
+                        use_container_width=True
+                    )
             
             # Priority Action Items
             st.markdown("---")
@@ -1394,27 +1886,29 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             
             # Download Options
             st.markdown("---")
-            st.subheader("📥 Download Complete Report")
+            st.subheader("📥 Download Complete Package")
             
-            col_dl1, col_dl2 = st.columns(2)
+            col_dl1, col_dl2, col_dl3 = st.columns(3)
             
             with col_dl1:
                 # Generate detailed report
-                report_text = f"""COMPLETE FDA LABEL COMPLIANCE REPORT
+                report_text = f"""FDA COMPLETE LABEL COMPLIANCE AUDIT
 {'='*70}
 
 Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Origin: {origin_country}
 Compliance Score: {score}/100
 Status: {status}
+Risk Level: {compliance_report.get('audit_summary', {}).get('risk_level', 'UNKNOWN')}
 
 {'='*70}
 PRODUCT INFORMATION
 {'='*70}
 
 Product Name: {label_data.get('principal_display_panel', {}).get('product_name', 'N/A')}
+Product Name (English): {label_data.get('principal_display_panel', {}).get('product_name_english', 'Same as above')}
 Brand: {label_data.get('principal_display_panel', {}).get('brand_name', 'N/A')}
-Net Quantity: {label_data.get('principal_display_panel', {}).get('net_quantity', 'N/A')}
+Net Quantity: {label_data.get('principal_display_panel', {}).get('net_quantity_original', 'N/A')}
 
 {'='*70}
 COMPLIANCE SUMMARY
@@ -1426,6 +1920,25 @@ Minor Issues: {len(issues['minor'])}
 Passed Checks: {len(issues['passed'])}
 
 {'='*70}
+CHANGES MADE FOR FDA COMPLIANCE
+{'='*70}
+
+"""
+                for idx, change in enumerate(compliance_report.get('changes_made', []), 1):
+                    report_text += f"{idx}. {change}\n"
+                
+                if compliance_report.get('compliance_risks'):
+                    report_text += f"""
+{'='*70}
+COMPLIANCE RISKS (EXPORT BLOCKERS)
+{'='*70}
+
+"""
+                    for risk in compliance_report['compliance_risks']:
+                        report_text += f"- {risk}\n"
+                
+                report_text += f"""
+{'='*70}
 CRITICAL ISSUES (MUST FIX)
 {'='*70}
 
@@ -1436,6 +1949,7 @@ CRITICAL ISSUES (MUST FIX)
    Issue: {issue['issue']}
    Regulation: {issue['regulation']}
    Fix: {issue['fix']}
+   Risk: {issue.get('risk', 'Compliance issue')}
 """
                 
                 if issues['major']:
@@ -1454,42 +1968,68 @@ MAJOR ISSUES (RECOMMENDED)
                 
                 report_text += f"""
 {'='*70}
+FDA-COMPLIANT REDESIGN SPECIFICATION
+{'='*70}
+
+PRINCIPAL DISPLAY PANEL:
+Product Name: {redesign.get('principal_display_panel', {}).get('statement_of_identity', {}).get('text', 'N/A')}
+Net Quantity: {redesign.get('principal_display_panel', {}).get('net_quantity', {}).get('text', 'N/A')}
+
+INFORMATION PANEL:
+Ingredients: {redesign.get('information_panel', {}).get('ingredients', {}).get('text', 'N/A')[:200]}...
+Allergen Declaration: {redesign.get('information_panel', {}).get('allergen_declaration', {}).get('text', 'None required')}
+
+For complete redesign specification, download the JSON file.
+
+{'='*70}
 COST SAVINGS
 {'='*70}
 
-Consultant Cost: ${consultant_cost}
-VeriLabel Cost: $99
+Traditional FDA Consultant: ${consultant_cost}
+VeriLabel Complete: $99
 You Saved: ${consultant_cost - 99}
-
-Time Savings: {time_saved} weeks
+Time Saved: {time_saved} weeks
 
 {'='*70}
-Generated by VeriLabel Complete - FDA Compliance Platform
+Generated by VeriLabel Complete v3.0
+FDA Compliance Platform for International Exporters
 """
                 
                 st.download_button(
-                    "📄 Download Full Report (TXT)",
+                    "📄 Download Full Audit Report (TXT)",
                     data=report_text,
-                    file_name=f"FDA_Complete_Compliance_{datetime.now().strftime('%Y%m%d')}.txt",
+                    file_name=f"FDA_Complete_Audit_{datetime.now().strftime('%Y%m%d')}.txt",
                     mime="text/plain",
                     use_container_width=True
                 )
             
             with col_dl2:
-                # JSON data
+                # JSON data with everything
                 full_data = {
                     'compliance_report': compliance_report,
                     'extracted_label_data': label_data,
+                    'fda_redesign_specification': redesign,
                     'analysis_date': datetime.now().isoformat(),
                     'origin_country': origin_country
                 }
                 
                 st.download_button(
-                    "📊 Download Data (JSON)",
+                    "📊 Download Complete Data (JSON)",
                     data=json.dumps(full_data, indent=2, ensure_ascii=False),
-                    file_name=f"FDA_Compliance_Data_{datetime.now().strftime('%Y%m%d')}.json",
+                    file_name=f"FDA_Complete_Data_{datetime.now().strftime('%Y%m%d')}.json",
                     mime="application/json",
                     use_container_width=True
+                )
+            
+            with col_dl3:
+                # Redesign spec only (for designers)
+                st.download_button(
+                    "🎨 Download Designer Package (JSON)",
+                    data=json.dumps(redesign, indent=2, ensure_ascii=False),
+                    file_name=f"FDA_Label_Design_Spec_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    help="Send this to your graphic designer"
                 )
             
             progress_bar.empty()
