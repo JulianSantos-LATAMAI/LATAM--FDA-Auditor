@@ -169,50 +169,6 @@ class CompleteLabelValidator:
                 changes_made.append(f"Converting from {nf_format} format to US FDA format")
             else:
                 issues['passed'].append('✅ Nutrition Facts panel present')
-            
-            # Check for sugar alcohols (polyols) that might be miscategorized
-            sugar_alcohols = nutrition.get('sugar_alcohols_g')
-            added_sugars = nutrition.get('added_sugars_g')
-            
-            if sugar_alcohols and float(sugar_alcohols) > 0:
-                changes_made.append(f"Identified {sugar_alcohols}g sugar alcohols (polyols) - these are NOT added sugars")
-                issues['passed'].append(f'✅ Sugar alcohols properly separated from added sugars')
-            
-            # Detect if ingredient list has polyols
-            ingredients_text = (info.get('ingredient_list_english') or info.get('ingredient_list_original', '')).lower()
-            polyol_keywords = ['maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 'lactitol', 'polioles', 'polyols', 'polialcoholes']
-            has_polyols = any(keyword in ingredients_text for keyword in polyol_keywords)
-            
-            if has_polyols:
-                # Check if Mexican label format
-                is_mexican = nf_format and 'mexican' in nf_format.lower()
-                mexican_origin = origin_country and 'mexico' in origin_country.lower()
-                
-                if is_mexican or mexican_origin:
-                    changes_made.append("⚠️ MEXICAN LABEL: Polyols detected - Mexican 'Azúcares añadidos' correctly excludes polyols (same as FDA)")
-                    if added_sugars and float(added_sugars) == 0:
-                        issues['passed'].append("✅ Added sugars = 0g is correct for products with only polyols")
-                
-                if not sugar_alcohols or float(sugar_alcohols) == 0:
-                    issues['major'].append({
-                        'requirement': 'Sugar Alcohols Declaration',
-                        'issue': 'Sugar alcohols/polyols detected in ingredients but not listed in nutrition facts',
-                        'regulation': '21 CFR 101.9(c)(6)(iii)',
-                        'fix': 'Add separate line: "Sugar Alcohol Xg" (indented under Total Carbohydrate)',
-                        'risk': 'Incomplete nutrition information'
-                    })
-                    changes_made.append("⚠️ WARNING: Polyols in ingredients - must be declared separately on US labels")
-                
-                # Extra validation: ensure polyols aren't counted as added sugars
-                if added_sugars and float(added_sugars) > 0:
-                    issues['major'].append({
-                        'requirement': 'Added Sugars vs Sugar Alcohols',
-                        'issue': 'Product contains polyols - verify added sugars do not include sugar alcohols',
-                        'regulation': '21 CFR 101.9(c)(6)(iii)',
-                        'fix': 'Separate polyols from added sugars. If only sweetener is polyols, added sugars should be 0g',
-                        'risk': 'Incorrect added sugars declaration'
-                    })
-                    changes_made.append("⚠️ VERIFY: Product has polyols - ensure added sugars calculation excludes them")
         
         # 4. Ingredients List
         ingredients_original = info.get('ingredient_list_original', '')
@@ -540,20 +496,9 @@ CRITICAL DISTINCTION - Added Sugars vs Sugar Alcohols:
 - Maltitol, sorbitol, xylitol, erythritol, isomalt
 - Mannitol, lactitol, hydrogenated starch hydrolysates
 - Any ingredient ending in "-itol"
-- Listed as "Polioles" or "Polialcoholes" in Spanish labels
-- Listed as "Outros carboidratos" in Portuguese/Brazilian labels
+- Listed as "Polioles" in Spanish labels
 
-**MEXICAN LABEL SPECIAL CASE:**
-If you see "Azúcares añadidos" on a Mexican label (NOM-051):
-- Mexican "Azúcares añadidos" follows SAME definition as FDA "Added Sugars"
-- If it says "0g", it means NO added sugars (polyols don't count)
-- DO NOT confuse polyols with added sugars
-- Look for separate line: "Polialcoholes" or in ingredient list: maltitol, sorbitol, etc.
-
-**CHILEAN LABEL SPECIAL CASE:**
-Chilean labels may show "Alto en Azúcares" (high in sugars) seal
-- This refers to TOTAL sugars, not added sugars
-- Must calculate added sugars from ingredient list
+If you see sugar alcohols/polyols in the ingredient list, they should be listed separately in nutrition data, NOT as added sugars.
 
 Extract nutrition data if present:
 Scan ingredients for FDA's 9 major allergens:
@@ -627,14 +572,6 @@ CRITICAL INSTRUCTIONS:
 - If anything is missing, use null (not empty string)
 - Be thorough - extract everything visible on the label
 - Note cultural/regional labeling elements (sellos, warnings, etc.)
-
-**MEXICAN LABELS - POLYOL HANDLING:**
-If label shows "Azúcares añadidos: 0g" AND ingredients contain maltitol/polyols:
-- This is CORRECT - Mexican NOM-051 excludes polyols from "azúcares añadidos"
-- FDA also excludes polyols from "added sugars"
-- Extract as: "added_sugars_g": "0"
-- Extract polyols separately in: "sugar_alcohols_g": "[amount if shown]"
-- DO NOT add polyol amounts to added sugars
 
 Extract now:"""
 
@@ -1612,148 +1549,12 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             status_text.text("✅ Label data extracted!" if language == "English" else "✅ ¡Datos de etiqueta extraídos!")
             progress_bar.progress(60)
             
-            # Parse JSON with error handling
-            try:
-                data_text = extraction_response['choices'][0]['message']['content']
-                data_text = data_text.replace('```json', '').replace('```', '').strip()
-                label_data = json.loads(data_text)
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                progress_bar.empty()
-                status_text.empty()
-                st.error("❌ Could not parse AI response")
-                with st.expander("🔍 Debug Info"):
-                    st.code(data_text if 'data_text' in locals() else "No data")
-                    st.error(str(e))
-                raise
+            # Parse JSON
+            data_text = extraction_response['choices'][0]['message']['content']
+            data_text = data_text.replace('```json', '').replace('```', '').strip()
+            label_data = json.loads(data_text)
             
-     # ===== CRITICAL FIX: POLYOL CORRECTION LOGIC =====
-# This MUST run to fix AI's polyol confusion
-
-st.warning("🔍 **Checking for polyol misclassification...**")
-
-nutrition = label_data.get('nutrition_facts', {})
-info_panel = label_data.get('information_panel', {})
-
-# Get ingredient text (check both English and original)
-ingredients_eng = (info_panel.get('ingredient_list_english') or '').lower()
-ingredients_orig = (info_panel.get('ingredient_list_original') or '').lower()
-ingredients_combined = ingredients_eng + ' ' + ingredients_orig
-
-# Polyol detection keywords (expanded list)
-polyol_keywords = [
-    'maltitol', 'sorbitol', 'xylitol', 'erythritol', 'isomalt', 'mannitol', 
-    'lactitol', 'polioles', 'polyols', 'polialcoholes', 
-    'jarabe de maltitol', 'maltitol syrup', 'sugar alcohol',
-    'poliol', 'alcohol de azúcar', 'maltitol en polvo',
-    'e965', 'e420', 'e967', 'e968'  # E-numbers for sugar alcohols
-]
-
-detected_polyols = [kw for kw in polyol_keywords if kw in ingredients_combined]
-
-if detected_polyols:
-    st.error(f"🚨 **POLYOLS DETECTED:** {', '.join(detected_polyols[:3])}")
-    
-    added_sugars_raw = nutrition.get('added_sugars_g', '0')
-    sugar_alcohols_raw = nutrition.get('sugar_alcohols_g', '0')
-    total_sugars_raw = nutrition.get('total_sugars_g', '0')
-    
-    # Parse values with proper error handling
-    try:
-        added_sugars_val = float(added_sugars_raw) if added_sugars_raw else 0
-        sugar_alcohols_val = float(sugar_alcohols_raw) if sugar_alcohols_raw else 0
-        total_sugars_val = float(total_sugars_raw) if total_sugars_raw else 0
-    except (ValueError, TypeError):
-        added_sugars_val = 0
-        sugar_alcohols_val = 0
-        total_sugars_val = 0
-    
-    st.warning(f"📊 **AI Extracted:** Total Sugars = {total_sugars_val}g, Added Sugars = {added_sugars_val}g, Sugar Alcohols = {sugar_alcohols_val}g")
-    
-    # SPECIAL CHECK: If polyols detected but added sugars matches polyol amount
-    if added_sugars_val > 0 and sugar_alcohols_val > 0:
-        if abs(added_sugars_val - sugar_alcohols_val) < 0.1:
-            st.error("🚨 **AI CONFUSION DETECTED!**")
-            st.error(f"❌ AI set BOTH Added Sugars AND Sugar Alcohols to {added_sugars_val}g")
-            st.error("🔧 **This is the same value duplicated! One must be wrong.**")
-            st.success(f"✅ **CORRECTION:** Polyols = {added_sugars_val}g, Added Sugars = 0g")
-            
-            # Keep polyols, zero out added sugars
-            nutrition['added_sugars_g'] = '0'
-    
-    # CRITICAL VALIDATION: Added sugars cannot exceed total sugars!
-    elif added_sugars_val > total_sugars_val and added_sugars_val > 0:
-        st.error("🚨 **IMPOSSIBLE VALUES DETECTED!**")
-        st.error(f"❌ Added Sugars ({added_sugars_val}g) CANNOT be greater than Total Sugars ({total_sugars_val}g)")
-        st.error("🔧 **This is mathematically impossible - the label or AI extraction is wrong!**")
-        st.error("")
-        st.error("💡 **DIAGNOSIS:** Product contains polyols. The {:.0f}g is likely the polyol amount, NOT added sugars!".format(added_sugars_val))
-        
-        # Auto-correct: Move added sugars to sugar alcohols
-        st.success(f"✅ **AUTO-CORRECTION:** Moving {added_sugars_val}g to Sugar Alcohols")
-        st.success("✅ **AUTO-CORRECTION:** Setting Added Sugars to 0g")
-        
-        nutrition['sugar_alcohols_g'] = str(added_sugars_val)
-        nutrition['added_sugars_g'] = '0'
-        
-        st.success(f"✅ **CORRECTED VALUES:** Total Sugars = {total_sugars_val}g, Added Sugars = 0g, Sugar Alcohols = {added_sugars_val}g")
-    
-    # CORRECTION LOGIC: If added sugars > 0 and product has polyols
-    elif added_sugars_val > 0:
-        st.error(f"❌ **ERROR DETECTED:** AI classified {added_sugars_val}g as 'Added Sugars'")
-        st.error("🔧 **CORRECTING NOW:** Polyols are NOT added sugars!")
-        
-        # Check if there's ACTUAL sugar in ingredients (not polyols)
-        real_sugar_keywords = [
-            'sugar', 'azúcar', 'sucrose', 'sacarosa',
-            'corn syrup', 'jarabe de maíz', 'high fructose',
-            'honey', 'miel', 'glucose', 'glucosa', 'fructose', 'fructosa',
-            'dextrose', 'dextrosa', 'brown sugar', 'cane sugar',
-            'agave', 'maple syrup'
-        ]
-        
-        has_real_sugar = any(kw in ingredients_combined for kw in real_sugar_keywords)
-        
-        if not has_real_sugar:
-            # Product ONLY has polyols, no real sugar
-            st.success(f"✅ **CORRECTION:** Moving {added_sugars_val}g to Sugar Alcohols")
-            st.success("✅ **CORRECTION:** Setting Added Sugars to 0g")
-            
-            # Apply correction
-            nutrition['sugar_alcohols_g'] = str(added_sugars_val)
-            nutrition['added_sugars_g'] = '0'
-            
-            st.success("✅ **FIXED:** Added Sugars = 0g, Sugar Alcohols = " + str(added_sugars_val) + "g")
-        else:
-            st.warning("⚠️ Product contains BOTH polyols AND real sugar")
-            st.warning("⚠️ Keeping current values but flagging for manual review")
-    else:
-        st.success(f"✅ Added Sugars already 0g - correct!")
-    
-    # Update the data
-    label_data['nutrition_facts'] = nutrition
-else:
-    st.success("✅ No polyols detected in ingredients")
-
-# STEP 2: Validate complete compliance
-```
-
-## Visual Guide:
-
-**BEFORE (broken code):**
-```
-Line 1680: # ===== CRITICAL FIX: POLYOL CORRECTION LOGIC =====
-...
-Line 1731: except:  ← BROKEN EXCEPTION BLOCK
-...
-Line 1780: # STEP 2: Validate complete compliance
-```
-
-**AFTER (fixed code):**
-```
-Line 1680: # ===== CRITICAL FIX: POLYOL CORRECTION LOGIC =====
-... (new clean code with ONE try-except)
-Line ~1780: # STEP 2: Validate complete compliance
-
+            # STEP 2: Validate complete compliance
             status_text.text("🔍 Step 2/3: Checking FDA compliance..." if language == "English" else "🔍 Paso 2/3: Verificando cumplimiento FDA...")
             progress_bar.progress(80)
             
@@ -2254,13 +2055,12 @@ FDA Compliance Platform for International Exporters
             progress_bar.empty()
             status_text.empty()
             
-        except (json.JSONDecodeError, KeyError) as e:
+        except json.JSONDecodeError:
             progress_bar.empty()
             status_text.empty()
             st.error("❌ Could not parse label data")
             with st.expander("🔍 Debug Info"):
-                st.code(data_text if 'data_text' in locals() else "No response")
-                st.error(str(e))
+                st.code(data_text)
                 
         except Exception as e:
             progress_bar.empty()
