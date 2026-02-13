@@ -1136,9 +1136,26 @@ class EnhancedFDAConverter:
         Convert Mexican VNR percentages to absolute FDA values
         This fixes the bug where Mexican vitamins showed wrong %DV
         """
-        vnr_data = original_data.get('nutrition_facts', {}).get('vitamins_vnr_percent', {})
+        # Try multiple paths to find VNR data
+        vnr_data = None
         
-        if not vnr_data:
+        # Path 1: nutrition_facts.vitamins_vnr_percent
+        if 'nutrition_facts' in original_data:
+            vnr_data = original_data['nutrition_facts'].get('vitamins_vnr_percent', {})
+        
+        # Path 2: direct vitamins_vnr_percent (flattened structure)
+        if not vnr_data or not any(vnr_data.values()):
+            vnr_data = original_data.get('vitamins_vnr_percent', {})
+        
+        # If still no data, try nested nutrition_facts in original
+        if not vnr_data or not any(vnr_data.values()):
+            if 'nutrition_facts' in original_data:
+                nf = original_data['nutrition_facts']
+                if isinstance(nf, dict) and 'vitamins_vnr_percent' in nf:
+                    vnr_data = nf['vitamins_vnr_percent']
+        
+        if not vnr_data or not any(v for v in vnr_data.values() if v):
+            self.warnings.append("⚠️ No Mexican VNR vitamin data found - using values from label")
             return corrected_data
         
         self.warnings.append("🇲🇽 Detected Mexican VNR format - converting to FDA values...")
@@ -1260,14 +1277,30 @@ class EnhancedFDAConverter:
 # Enhanced extraction prompt for conversion mode
 ENHANCED_EXTRACTION_PROMPT = """You are an expert FDA nutrition label data extractor. Extract ALL nutritional information with PERFECT accuracy.
 
-**CRITICAL: If this is a Mexican label with %VNR vitamins, extract them into vitamins_vnr_percent field.**
+**CRITICAL INSTRUCTIONS:**
+
+1. If you see a MEXICAN LABEL with vitamins listed as %VNR or %VRN percentages (like "Vitamina B1 15%", "Calcio 4%", "Hierro 2%"), you MUST extract those percentages into the vitamins_vnr_percent field.
+
+2. Mexican labels often have vitamin tables on the RIGHT SIDE showing:
+   - Vitamina B1, B2, etc.
+   - Calcio (Calcium)
+   - Hierro (Iron)
+   - Zinc
+   - Yodo (Iodine)
+   - Ácido Fólico (Folic Acid)
+   
+3. Look for percentages next to these vitamins (e.g., "15%", "10%", "4%", "2%")
+
+4. If you see absolute amounts (like "Calcium 10mg"), extract those into calcium_mg, iron_mg, etc.
+
+5. If you DON'T see any vitamin information, leave those fields as null.
 
 RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
 
 {
     "product_name": "exact name",
     "serving_size_original": "original text",
-    "serving_size_metric": "30g or 240mL",
+    "serving_size_metric": "24.2g or 30g or 240mL",
     "servings_per_container": "number",
     "calories": "number",
     "total_fat_g": "number",
@@ -1280,17 +1313,40 @@ RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
     "total_sugars_g": "number",
     "added_sugars_g": "number or null",
     "protein_g": "number",
-    "vitamin_d_mcg": "number or null",
-    "calcium_mg": "number or null",
-    "iron_mg": "number or null",
-    "potassium_mg": "number or null",
-    "vitamins_vnr_percent": {
-        "calcium": "percentage if VNR shown (e.g., 4 for 4%)",
-        "iron": "percentage if VNR shown",
-        "zinc": "percentage if VNR shown",
-        "iodine": "percentage if VNR shown",
-        "vitamin_b1": "percentage if VNR shown",
-        "vitamin_b2": "percentage if VNR shown"
+    "vitamin_d_mcg": "number or null (extract if shown as absolute amount)",
+    "calcium_mg": "number or null (extract if shown as absolute amount)",
+    "iron_mg": "number or null (extract if shown as absolute amount)",
+    "potassium_mg": "number or null (extract if shown as absolute amount)",
+    "nutrition_facts": {
+        "vitamins_vnr_percent": {
+            "vitamin_b1": "percentage number only (e.g., 15 for 15% VNR) or null",
+            "vitamin_b2": "percentage number only or null",
+            "vitamin_b6": "percentage number only or null",
+            "vitamin_b12": "percentage number only or null",
+            "vitamin_c": "percentage number only or null",
+            "vitamin_d": "percentage number only or null",
+            "vitamin_e": "percentage number only or null",
+            "calcium": "percentage number only (e.g., 4 for 4% VNR) or null",
+            "iron": "percentage number only (e.g., 2 for 2% VNR) or null",
+            "zinc": "percentage number only or null",
+            "iodine": "percentage number only or null",
+            "folic_acid": "percentage number only or null"
+        }
+    }
+}
+
+EXAMPLE for Mexican label showing "Calcio 4%" and "Hierro 2%":
+{
+    ...
+    "calcium_mg": null,
+    "iron_mg": null,
+    "nutrition_facts": {
+        "vitamins_vnr_percent": {
+            "calcium": 4,
+            "iron": 2,
+            "vitamin_b1": null,
+            ...
+        }
     }
 }"""
 
@@ -1533,7 +1589,7 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Extract nutrition data as JSON. If Mexican label with %VNR vitamins, extract them."},
+                            {"type": "text", "text": "Extract nutrition data as JSON. IMPORTANT: If this is a Mexican label, look at the vitamin table (usually on the right side) and extract any %VNR percentages you see for vitamins like Vitamina B1, B2, Calcio (Calcium), Hierro (Iron), Zinc, Yodo (Iodine), etc. Extract the percentage numbers into vitamins_vnr_percent field."},
                             {"type": "image_url", "image_url": {"url": image_data_url, "detail": "high"}}
                         ]
                     }
@@ -1548,6 +1604,10 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             data_text = extraction_response['choices'][0]['message']['content']
             data_text = data_text.replace('```json', '').replace('```', '').strip()
             nutrition_data = json.loads(data_text)
+            
+            # DEBUG: Show what was extracted
+            with st.expander("🔍 Debug: Extracted Data", expanded=False):
+                st.json(nutrition_data)
             
             status_text.text("🔍 Step 2/4: Validating FDA compliance + Converting Mexican vitamins...")
             progress_bar.progress(55)
