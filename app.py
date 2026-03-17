@@ -1,9 +1,7 @@
 import streamlit as st
 import base64
-import os
-import openai
-from pathlib import Path
-from datetime import datetime
+import traceback
+from openai import OpenAI
 import json
 import re
 from typing import Dict, List, Tuple, Optional
@@ -27,20 +25,22 @@ class AllergenDetector:
     """Detects allergens in ingredient lists"""
     
     MAJOR_ALLERGENS = {
-        'milk': ['milk', 'cream', 'butter', 'cheese', 'whey', 'casein', 'lactose', 'ghee', 'leche'],
-        'eggs': ['egg', 'eggs', 'albumin', 'lysozyme', 'mayonnaise', 'huevo'],
-        'fish': ['fish', 'anchovies', 'bass', 'cod', 'salmon', 'tuna', 'tilapia', 'pescado'],
+        'milk': ['milk', 'cream', 'butter', 'cheese', 'whey', 'casein', 'lactose', 'ghee', 'leche', 'dairy', 'milk solids', 'milk powder'],
+        'eggs': ['egg', 'eggs', 'albumin', 'lysozyme', 'mayonnaise', 'huevo', 'egg white', 'egg yolk'],
+        'fish': ['fish', 'anchovies', 'bass', 'cod', 'salmon', 'tuna', 'tilapia', 'pescado', 'fish sauce', 'fish oil', 'fish stock'],
         'shellfish': ['crab', 'lobster', 'shrimp', 'prawns', 'clams', 'mussels', 'oysters', 'scallops', 'camarones'],
         'tree_nuts': ['almond', 'cashew', 'walnut', 'pecan', 'pistachio', 'hazelnut', 'macadamia', 'nuez'],
         'peanuts': ['peanut', 'peanuts', 'groundnut', 'cacahuate', 'maní'],
-        'wheat': ['wheat', 'flour', 'durum', 'semolina', 'spelt', 'trigo', 'harina'],
-        'soybeans': ['soy', 'soya', 'soybean', 'tofu', 'tempeh', 'lecithin', 'soja'],
-        'sesame': ['sesame', 'tahini', 'ajonjolí', 'sésamo']
+        'wheat': ['wheat', 'flour', 'durum', 'semolina', 'spelt', 'trigo', 'harina', 'gluten'],
+        'soybeans': ['soy', 'soya', 'soybean', 'tofu', 'tempeh', 'soy lecithin', 'soja'],
+        'sesame': ['sesame', 'tahini', 'ajonjolí', 'sésamo', 'halvah']
     }
     
     @classmethod
     def detect_allergens(cls, ingredient_text: str) -> Dict[str, List[str]]:
         """Detect allergens in ingredient text"""
+        if not ingredient_text:
+            return {}
         ingredient_text_lower = ingredient_text.lower()
         found_allergens = {}
         
@@ -108,8 +108,8 @@ class CompleteLabelValidator:
             })
             compliance_risks.append('Missing Net Quantity')
         else:
-            has_us = bool(net_qty_us) or any(u in net_qty_original.lower() for u in ['oz', 'lb', 'fl oz'])
-            has_metric = bool(net_qty_metric) or any(u in net_qty_original.lower() for u in ['g', 'kg', 'ml', 'l'])
+            has_us = bool(net_qty_us) or bool(re.search(r'\b(oz|lb|fl\s*oz)\b', net_qty_original, re.IGNORECASE))
+            has_metric = bool(net_qty_metric) or bool(re.search(r'\b(\d+\.?\d*)\s*(kg|g|ml|l)\b', net_qty_original, re.IGNORECASE))
             
             if not has_us:
                 issues['critical'].append({
@@ -197,13 +197,25 @@ class CompleteLabelValidator:
             allergen_stmt_english = info.get('allergen_statement_english', '')
             
             if detected:
+                # Map allergen dict keys to all acceptable declaration terms
+                ALLERGEN_ALIASES = {
+                    'milk': ['milk', 'dairy'],
+                    'eggs': ['egg', 'eggs'],
+                    'fish': ['fish'],
+                    'shellfish': ['shellfish', 'crustacean'],
+                    'tree_nuts': ['tree nut', 'tree nuts'],
+                    'peanuts': ['peanut', 'peanuts'],
+                    'wheat': ['wheat'],
+                    'soybeans': ['soy', 'soya', 'soybean', 'soybeans'],
+                    'sesame': ['sesame'],
+                }
                 missing_allergens = []
                 allergen_text = (allergen_stmt_english or allergen_stmt_original or '').lower()
-                
+
                 for allergen_type in detected.keys():
-                    allergen_name = allergen_type.replace('_', ' ')
-                    if allergen_name not in allergen_text:
-                        missing_allergens.append(allergen_name.title())
+                    aliases = ALLERGEN_ALIASES.get(allergen_type, [allergen_type.replace('_', ' ')])
+                    if not any(alias in allergen_text for alias in aliases):
+                        missing_allergens.append(allergen_type.replace('_', ' ').title())
                 
                 if missing_allergens:
                     issues['critical'].append({
@@ -343,11 +355,11 @@ class CompleteLabelValidator:
                 elif 'g' in net_qty_metric.lower():
                     oz = round(val / 28.35, 1)
                     net_qty_us = f"{oz} oz"
-                elif 'l' in net_qty_metric.lower():
-                    fl_oz = round(val * 33.814, 1)
-                    net_qty_us = f"{fl_oz} fl oz"
                 elif 'ml' in net_qty_metric.lower():
                     fl_oz = round(val / 29.57, 1)
+                    net_qty_us = f"{fl_oz} fl oz"
+                elif 'l' in net_qty_metric.lower():
+                    fl_oz = round(val * 33.814, 1)
                     net_qty_us = f"{fl_oz} fl oz"
         
         net_quantity_compliant = f"Net Wt {net_qty_us} ({net_qty_metric})" if net_qty_us and net_qty_metric else "NET QUANTITY REQUIRED"
@@ -548,9 +560,9 @@ Return ONLY valid JSON with this exact structure:
     "nutrition_facts": {
         "present": true/false,
         "format": "Chilean/Mexican/Brazilian/US/Other",
-        "serving_size_original": "as shown on label",
-        "serving_size_metric": "just the metric (e.g., '30g')",
-        "servings_per_container": "number",
+        "serving_size_original": "FULL text exactly as shown on label (e.g., '25g (1½ Taza de Té)' or '100ml') — NEVER leave empty",
+        "serving_size_metric": "just the metric portion (e.g., '30g' or '100ml')",
+        "servings_per_container": "number or null if not found — NEVER default to 1 unless label explicitly states 1",
         "calories": "number",
         "total_fat_g": "number",
         "saturated_fat_g": "number",
@@ -558,9 +570,9 @@ Return ONLY valid JSON with this exact structure:
         "cholesterol_mg": "number",
         "sodium_mg": "number",
         "total_carb_g": "number",
-        "fiber_g": "number",
+        "fiber_g": "number or null if NOT explicitly on label — NEVER infer or assume",
         "total_sugars_g": "number",
-        "added_sugars_g": "number or null if not specified (DO NOT include sugar alcohols here)",
+        "added_sugars_g": "number or null if NOT explicitly on label — NEVER infer or assume (DO NOT include sugar alcohols here)",
         "sugar_alcohols_g": "number or null (maltitol, sorbitol, xylitol, etc.)",
         "protein_g": "number",
         "vitamin_d_mcg": "number or null",
@@ -599,6 +611,9 @@ CRITICAL INSTRUCTIONS:
 - If anything is missing, use null (not empty string)
 - Be thorough - extract everything visible on the label
 - Note cultural/regional labeling elements (sellos, warnings, etc.)
+- SERVINGS PER CONTAINER: Extract the EXACT value. NEVER default to 1. If not found, return null.
+- SERVING SIZE: serving_size_original must be the FULL text as shown. Do NOT leave empty.
+- FIBER & ADDED SUGARS: Only extract if EXPLICITLY on the label. Return null if not present — NEVER infer.
 
 Extract now:"""
 
@@ -710,10 +725,22 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     def get_val(key, default='0'):
         val = nutrition_data.get(key, default)
         return val if val not in [None, '', 'null'] else default
-    
+
+    def is_present(key):
+        """Returns True only if the value is explicitly known (not None/null/empty)."""
+        val = nutrition_data.get(key)
+        return val is not None and val != '' and val != 'null'
+
     def get_dv(key):
         return percent_dv.get(key, 0)
-    
+
+    # Servings per container — None means unknown, display warning
+    raw_spc = nutrition_data.get('servings_per_container')
+    if raw_spc is None or raw_spc == '' or raw_spc == 'null':
+        servings_display = '<span style="color:red;font-weight:700;">⚠ VERIFY</span>'
+    else:
+        servings_display = f'<span>{raw_spc}</span>'
+
     # Apply FDA rounding rules
     calories = apply_fda_rounding_rules(get_val('calories'), 'calories')
     total_fat = apply_fda_rounding_rules(get_val('total_fat_g'), 'total_fat')
@@ -722,9 +749,9 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     cholesterol = apply_fda_rounding_rules(get_val('cholesterol_mg'), 'cholesterol')
     sodium = apply_fda_rounding_rules(get_val('sodium_mg'), 'sodium')
     total_carb = apply_fda_rounding_rules(get_val('total_carb_g'), 'total_carb')
-    fiber = apply_fda_rounding_rules(get_val('fiber_g'), 'fiber')
+    fiber = apply_fda_rounding_rules(get_val('fiber_g'), 'fiber') if is_present('fiber_g') else None
     total_sugars = apply_fda_rounding_rules(get_val('total_sugars_g'), 'total_sugars')
-    added_sugars = apply_fda_rounding_rules(get_val('added_sugars_g'), 'added_sugars')
+    added_sugars = apply_fda_rounding_rules(get_val('added_sugars_g'), 'added_sugars') if is_present('added_sugars_g') else None
     protein = apply_fda_rounding_rules(get_val('protein_g'), 'protein')
     vitamin_d = apply_fda_rounding_rules(get_val('vitamin_d_mcg'), 'vitamin_d_mcg')
     calcium = apply_fda_rounding_rules(get_val('calcium_mg'), 'calcium_mg')
@@ -803,8 +830,8 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             
             <div class="bar-thin"></div>
             <div class="serving-container">
-                <div class="serving-line"><strong>Servings per container</strong> <span>{get_val('servings_per_container', '1')}</span></div>
-                <div class="serving-line"><strong>Serving size</strong> <span>{get_val('serving_size_us', '2 tbsp (30g)')}</span></div>
+                <div class="serving-line"><strong>Servings per container</strong> {servings_display}</div>
+                <div class="serving-line"><strong>Serving size</strong> <span>{get_val('serving_size_us', get_val('serving_size_original', 'SEE LABEL'))}</span></div>
             </div>
             
             <div class="bar-thick"></div>
@@ -867,14 +894,8 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             </div>
             <div class="bar-thin"></div>
             
-            <div class="nutrient-row nutrient-indent-1">
-                <div class="nutrient-label">
-                    <span class="nutrient-amount">Dietary Fiber {fiber}g</span>
-                </div>
-                <div class="nutrient-dv">{get_dv('fiber')}%</div>
-            </div>
-            <div class="bar-thin"></div>
-            
+            {'<div class="nutrient-row nutrient-indent-1"><div class="nutrient-label"><span class="nutrient-amount">Dietary Fiber ' + str(fiber) + 'g</span></div><div class="nutrient-dv">' + str(get_dv('fiber')) + '%</div></div><div class="bar-thin"></div>' if fiber is not None else ''}
+
             <div class="nutrient-row nutrient-indent-1">
                 <div class="nutrient-label">
                     <span class="nutrient-amount">Total Sugars {total_sugars}g</span>
@@ -882,14 +903,8 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
                 <div class="nutrient-dv"></div>
             </div>
             <div class="bar-thin"></div>
-            
-            <div class="nutrient-row nutrient-indent-2">
-                <div class="nutrient-label">
-                    <span class="nutrient-amount">Includes {added_sugars}g Added Sugars</span>
-                </div>
-                <div class="nutrient-dv">{get_dv('added_sugars')}%</div>
-            </div>
-            <div class="bar-thin"></div>
+
+            {'<div class="nutrient-row nutrient-indent-2"><div class="nutrient-label"><span class="nutrient-amount">Includes ' + str(added_sugars) + 'g Added Sugars</span></div><div class="nutrient-dv">' + str(get_dv('added_sugars')) + '%</div></div><div class="bar-thin"></div>' if added_sugars is not None else ''}
             
             <div class="nutrient-row">
                 <div class="nutrient-label">
@@ -974,6 +989,15 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
 # FDA VALIDATOR CLASSES - UPDATED WITH MEXICAN VNR CONVERSION
 # ============================================================================
 
+def _safe_float(val, default=0):
+    try:
+        if val in (None, '', 'null'):
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 class FDALabelValidator:
     """Validates and corrects nutrition data according to FDA standards"""
     
@@ -1029,28 +1053,38 @@ class FDALabelValidator:
     def validate_calorie_calculation(data: Dict) -> Tuple[bool, str, float]:
         """Validate calorie calculation using Atwater factors"""
         try:
-            fat_g = float(data.get('total_fat_g', 0))
-            carb_g = float(data.get('total_carb_g', 0))
-            protein_g = float(data.get('protein_g', 0))
-            
+            fat_g = _safe_float(data.get('total_fat_g', 0))
+            carb_g = _safe_float(data.get('total_carb_g', 0))
+            protein_g = _safe_float(data.get('protein_g', 0))
+
             calculated = (fat_g * 9) + (carb_g * 4) + (protein_g * 4)
             calculated = round(calculated)
-            stated_calories = float(data.get('calories', 0))
-            
-            tolerance = 0.15
-            lower_bound = calculated * (1 - tolerance)
-            upper_bound = calculated * (1 + tolerance)
-            
-            if lower_bound <= stated_calories <= upper_bound:
-                return True, "Calorie calculation verified", calculated
-            else:
-                return False, f"Calorie mismatch: Stated {stated_calories}, Calculated {calculated}", calculated
+            stated_calories = _safe_float(data.get('calories', 0))
+
+            pct_diff = abs(stated_calories - calculated) / calculated if calculated > 0 else 0
+            abs_diff = abs(stated_calories - calculated)
+            if pct_diff > 0.15 and abs_diff > 20:
+                return False, f"Calorie mismatch: Stated {stated_calories}, Calculated {calculated} (diff: {abs_diff:.0f} cal, {pct_diff:.1%})", calculated
+            return True, f"Calorie calculation verified (diff: {abs_diff:.0f} cal, {pct_diff:.1%})", calculated
         except (ValueError, TypeError) as e:
             return False, f"Error validating calories: {str(e)}", 0
     
     @staticmethod
     def convert_metric_to_us_serving(metric_str: str) -> str:
         """Convert metric serving sizes to US household measures"""
+        if not metric_str:
+            return ''
+        # If the string already contains household language, return as-is (after Spanish→English)
+        household_keywords = ['cup', 'tbsp', 'tsp', 'oz', 'fl oz', 'serving',
+                              'taza', 'cucharada', 'cucharadita', 'vaso']
+        lower_check = metric_str.lower()
+        if any(kw in lower_check for kw in household_keywords):
+            translated = metric_str
+            translated = re.sub(r'\btaza\b', 'cup', translated, flags=re.IGNORECASE)
+            translated = re.sub(r'\bcucharadita\b', 'tsp', translated, flags=re.IGNORECASE)
+            translated = re.sub(r'\bcucharada\b', 'tbsp', translated, flags=re.IGNORECASE)
+            translated = re.sub(r'\bvaso\b', 'glass', translated, flags=re.IGNORECASE)
+            return translated
         metric_str = metric_str.strip().lower()
         
         conversions = {
@@ -1072,21 +1106,35 @@ class FDALabelValidator:
             unit = match.group(2)
             
             if unit == 'g':
-                if amount <= 15:
+                if amount <= 5:
+                    return f"1 tsp ({amount}g)"
+                elif amount <= 15:
                     return f"1 tbsp ({amount}g)"
                 elif amount <= 30:
                     return f"2 tbsp ({amount}g)"
-                elif amount <= 100:
+                elif amount <= 45:
                     return f"1/4 cup ({int(amount)}g)"
+                elif amount <= 65:
+                    return f"1/3 cup ({int(amount)}g)"
+                elif amount <= 90:
+                    return f"1/2 cup ({int(amount)}g)"
                 else:
                     oz = round(amount / 28.35, 1)
                     return f"{oz} oz ({int(amount)}g)"
             elif unit == 'ml':
-                if amount <= 15:
+                if amount <= 5:
+                    return f"1 tsp ({int(amount)}mL)"
+                elif amount <= 15:
                     return f"1 tbsp ({int(amount)}mL)"
-                elif amount <= 120:
-                    cups = round(amount / 240, 2)
-                    return f"{cups} cup ({int(amount)}mL)"
+                elif amount <= 30:
+                    tbsp = round(amount / 15)
+                    return f"{tbsp} tbsp ({int(amount)}mL)"
+                elif amount <= 60:
+                    fl_oz = round(amount / 29.57, 1)
+                    return f"{fl_oz} fl oz ({int(amount)}mL)"
+                elif amount <= 240:
+                    fl_oz = round(amount / 29.57, 1)
+                    return f"{fl_oz} fl oz ({int(amount)}mL)"
                 else:
                     fl_oz = round(amount / 29.57, 1)
                     return f"{fl_oz} fl oz ({int(amount)}mL)"
@@ -1108,18 +1156,36 @@ class EnhancedFDAConverter:
         self.errors = []
         
         corrected_data = self._validate_numeric_values(nutrition_data)
-        
+
         # NEW: Convert Mexican VNR percentages to FDA amounts
-        if 'vitamins_vnr_percent' in nutrition_data.get('nutrition_facts', {}):
+        nf = nutrition_data.get('nutrition_facts', {})
+        if not isinstance(nf, dict):
+            nf = {}
+        if 'vitamins_vnr_percent' in nf:
             corrected_data = self._convert_mexican_vitamins(corrected_data, nutrition_data)
         
         is_valid, message, calculated = self.validator.validate_calorie_calculation(corrected_data)
         if not is_valid:
             self.warnings.append(message)
         
-        if 'serving_size_metric' in corrected_data:
-            us_serving = self.validator.convert_metric_to_us_serving(corrected_data['serving_size_metric'])
-            corrected_data['serving_size_us'] = us_serving
+        # Build serving_size_us with priority:
+        # 1. If serving_size_original contains household language, translate and use it
+        # 2. Else convert serving_size_metric to US
+        # 3. Else fall back to serving_size_original as-is
+        serving_original = corrected_data.get('serving_size_original', '')
+        serving_metric = corrected_data.get('serving_size_metric', '')
+        household_keywords = ['cup', 'tbsp', 'tsp', 'oz', 'fl oz', 'serving',
+                              'taza', 'cucharada', 'cucharadita', 'vaso']
+        if serving_original and any(kw in serving_original.lower() for kw in household_keywords):
+            us_serving = self.validator.convert_metric_to_us_serving(serving_original)
+        elif serving_metric:
+            converted = self.validator.convert_metric_to_us_serving(serving_metric)
+            us_serving = converted if converted and converted != f"1 serving ({serving_metric})" else (serving_original or converted)
+        elif serving_original:
+            us_serving = serving_original
+        else:
+            us_serving = ''
+        corrected_data['serving_size_us'] = us_serving
         
         corrected_data['percent_dv'] = self._calculate_all_dv(corrected_data)
         
@@ -1136,23 +1202,16 @@ class EnhancedFDAConverter:
         Convert Mexican VNR percentages to absolute FDA values
         This fixes the bug where Mexican vitamins showed wrong %DV
         """
-        # Try multiple paths to find VNR data
+        # Try two paths to find VNR data
         vnr_data = None
-        
-        # Path 1: nutrition_facts.vitamins_vnr_percent
+
+        # Path 1: nutrition_facts.vitamins_vnr_percent (standard nested structure)
         if 'nutrition_facts' in original_data:
             vnr_data = original_data['nutrition_facts'].get('vitamins_vnr_percent', {})
-        
+
         # Path 2: direct vitamins_vnr_percent (flattened structure)
         if not vnr_data or not any(vnr_data.values()):
             vnr_data = original_data.get('vitamins_vnr_percent', {})
-        
-        # If still no data, try nested nutrition_facts in original
-        if not vnr_data or not any(vnr_data.values()):
-            if 'nutrition_facts' in original_data:
-                nf = original_data['nutrition_facts']
-                if isinstance(nf, dict) and 'vitamins_vnr_percent' in nf:
-                    vnr_data = nf['vitamins_vnr_percent']
         
         if not vnr_data or not any(v for v in vnr_data.values() if v):
             self.warnings.append("⚠️ No Mexican VNR vitamin data found - using values from label")
@@ -1206,47 +1265,65 @@ class EnhancedFDAConverter:
     def _validate_numeric_values(self, data: Dict) -> Dict:
         """Ensure all numeric values are valid"""
         corrected = data.copy()
-        
+
         # Handle nested nutrition_facts structure
         if 'nutrition_facts' in data:
             nf = data['nutrition_facts']
+            if not isinstance(nf, dict):
+                nf = {}
             for key, value in nf.items():
-                if key not in ['present', 'format', 'serving_size_original', 'serving_size_metric', 
+                if key not in ['present', 'format', 'serving_size_original', 'serving_size_metric',
                                'serving_size_us', 'servings_per_container', 'vitamins_vnr_percent']:
                     corrected[key] = value
-        
+
+        # Fields that must stay None if not explicitly on the label — never default to 0
+        NULLABLE_FIELDS = {'fiber_g', 'added_sugars_g'}
+
         numeric_fields = [
             'calories', 'total_fat_g', 'saturated_fat_g', 'trans_fat_g',
             'cholesterol_mg', 'sodium_mg', 'total_carb_g', 'fiber_g',
             'total_sugars_g', 'added_sugars_g', 'protein_g',
             'vitamin_d_mcg', 'calcium_mg', 'iron_mg', 'potassium_mg'
         ]
-        
+
         for field in numeric_fields:
             if field in corrected:
                 try:
                     value = corrected[field]
                     if value is None or value == '' or value == 'null':
-                        corrected[field] = '0'
+                        corrected[field] = None if field in NULLABLE_FIELDS else '0'
                     else:
                         float_val = float(value)
                         if float_val < 0:
                             self.errors.append(f"{field} cannot be negative")
-                            corrected[field] = '0'
+                            corrected[field] = None if field in NULLABLE_FIELDS else '0'
                         else:
                             corrected[field] = str(float_val)
                 except (ValueError, TypeError):
                     self.errors.append(f"Invalid numeric value for {field}")
-                    corrected[field] = '0'
+                    corrected[field] = None if field in NULLABLE_FIELDS else '0'
             else:
-                corrected[field] = '0'
-        
+                corrected[field] = None if field in NULLABLE_FIELDS else '0'
+
         # Preserve serving size fields
         if 'nutrition_facts' in data:
             corrected['serving_size_original'] = data['nutrition_facts'].get('serving_size_original', '')
             corrected['serving_size_metric'] = data['nutrition_facts'].get('serving_size_metric', '')
-            corrected['servings_per_container'] = data['nutrition_facts'].get('servings_per_container', '1')
-        
+            # servings_per_container: preserve null — never default to '1'
+            raw_spc = data['nutrition_facts'].get('servings_per_container')
+            if raw_spc is None or raw_spc == '' or raw_spc == 'null':
+                corrected['servings_per_container'] = None
+            else:
+                corrected['servings_per_container'] = str(raw_spc)
+        elif 'servings_per_container' in data:
+            raw_spc = data.get('servings_per_container')
+            if raw_spc is None or raw_spc == '' or raw_spc == 'null':
+                corrected['servings_per_container'] = None
+            else:
+                corrected['servings_per_container'] = str(raw_spc)
+        else:
+            corrected['servings_per_container'] = None
+
         return corrected
     
     def _calculate_all_dv(self, data: Dict) -> Dict:
@@ -1264,12 +1341,9 @@ class EnhancedFDAConverter:
         
         for nutrient, field in mappings.items():
             if field in data:
-                try:
-                    amount = float(data[field])
-                    dv = self.validator.calculate_percent_dv(nutrient, amount)
-                    dv_values[nutrient] = dv
-                except (ValueError, TypeError):
-                    dv_values[nutrient] = 0
+                amount = _safe_float(data[field])
+                dv = self.validator.calculate_percent_dv(nutrient, amount)
+                dv_values[nutrient] = dv
         
         return dv_values
 
@@ -1288,20 +1362,28 @@ ENHANCED_EXTRACTION_PROMPT = """You are an expert FDA nutrition label data extra
    - Zinc
    - Yodo (Iodine)
    - Ácido Fólico (Folic Acid)
-   
+
 3. Look for percentages next to these vitamins (e.g., "15%", "10%", "4%", "2%")
 
 4. If you see absolute amounts (like "Calcium 10mg"), extract those into calcium_mg, iron_mg, etc.
 
 5. If you DON'T see any vitamin information, leave those fields as null.
 
+6. SERVINGS PER CONTAINER: Extract the EXACT number from the label. NEVER default to 1 unless the label explicitly states 1. If you cannot find it, return null — not 1.
+
+7. SERVING SIZE: serving_size_original must be the FULL text exactly as shown (e.g., "25g (1½ Taza de Té)" or "100ml"). Do NOT leave it empty. serving_size_metric must be just the metric portion (e.g., "25g" or "100ml").
+
+8. DIETARY FIBER: Only extract fiber_g if it is EXPLICITLY listed on the label. If not shown, return null — not 0. NEVER infer or assume this value.
+
+9. ADDED SUGARS: Only extract added_sugars_g if it is EXPLICITLY listed on the label. If not shown, return null — not 0. NEVER infer or assume this value.
+
 RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
 
 {
     "product_name": "exact name",
-    "serving_size_original": "original text",
-    "serving_size_metric": "24.2g or 30g or 240mL",
-    "servings_per_container": "number",
+    "serving_size_original": "FULL text exactly as shown on label (e.g., '25g (1½ Taza de Té)' or '100ml') — NEVER leave empty",
+    "serving_size_metric": "just the metric portion (e.g., '25g' or '100ml')",
+    "servings_per_container": "number or null if not found — NEVER default to 1",
     "calories": "number",
     "total_fat_g": "number",
     "saturated_fat_g": "number",
@@ -1309,9 +1391,9 @@ RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
     "cholesterol_mg": "number",
     "sodium_mg": "number",
     "total_carb_g": "number",
-    "fiber_g": "number",
+    "fiber_g": "number or null if NOT explicitly on label — NEVER infer",
     "total_sugars_g": "number",
-    "added_sugars_g": "number or null",
+    "added_sugars_g": "number or null if NOT explicitly on label — NEVER infer",
     "protein_g": "number",
     "vitamin_d_mcg": "number or null (extract if shown as absolute amount)",
     "calcium_mg": "number or null (extract if shown as absolute amount)",
@@ -1391,7 +1473,6 @@ translations = {
         "title": "🌎 LATAM → USA Food Export Compliance Tool",
         "subtitle": "Get Your Products USA-Ready in Minutes, Not Months",
         "upload": "Upload Your Current Label",
-        "analyze": "🚀 Check USA Compliance",
         "config": "Configuration",
         "results": "Compliance Report",
         "export": "Download Reports",
@@ -1402,7 +1483,6 @@ translations = {
         "title": "🌎 Herramienta de Exportación LATAM → USA",
         "subtitle": "Haga sus Productos Listos para USA en Minutos, No Meses",
         "upload": "Suba su Etiqueta Actual",
-        "analyze": "🚀 Verificar Cumplimiento USA",
         "config": "Configuración",
         "results": "Reporte de Cumplimiento",
         "export": "Descargar Reportes",
@@ -1412,15 +1492,6 @@ translations = {
 }
 
 t = translations[language]
-
-def calculate_dv(nutrient_type, amount):
-    """Backwards compatibility wrapper"""
-    validator = FDALabelValidator()
-    try:
-        amount_num = float(amount) if amount else 0
-        return validator.calculate_percent_dv(nutrient_type, amount_num)
-    except (ValueError, TypeError):
-        return 0
 
 st.markdown(f'<p class="main-header">{t["title"]}</p>', unsafe_allow_html=True)
 st.markdown(f'<p class="sub-header">{t["subtitle"]}</p>', unsafe_allow_html=True)
@@ -1434,9 +1505,9 @@ st.markdown("""
 
 operation_mode = st.radio(
     "🔧 Select Tool Mode:",
-    ["🔍 Audit Existing Label", "🔄 Convert LATAM Label to FDA Format", "🎨 Complete Label Compliance"],
+    ["🔄 Convert LATAM Label to FDA Format", "🎨 Complete Label Compliance"],
     horizontal=True,
-    help="Audit FDA label | Convert nutrition panel | Analyze entire label for complete FDA compliance"
+    help="Convert nutrition panel | Analyze entire label for complete FDA compliance"
 )
 
 st.markdown("---")
@@ -1460,13 +1531,13 @@ with st.sidebar:
     
     origin_country = st.selectbox(
         "🏭 Your Country",
-        ["🇲🇽 Mexico", "🇨🇴 Colombia", "🇨🇱 Chile", "🇧🇷 Brazil"]
+        ["🇲🇽 Mexico", "🇨🇴 Colombia", "🇨🇱 Chile"]
     )
     
     st.markdown("---")
     st.subheader("🤖 Analysis Settings")
     
-    model_choice = st.selectbox("AI Model", ["gpt-4o", "gpt-4-vision-preview"], index=0)
+    model_choice = st.selectbox("AI Model", ["gpt-4o", "gpt-4o-mini"], index=0)
     strictness = st.radio(
         "Audit Strictness",
         ["Lenient (Screening)", "Balanced (Recommended)", "Strict (Final Check)"],
@@ -1481,24 +1552,12 @@ with st.sidebar:
     temperature = temp_map[strictness]
     
     st.markdown("---")
-    
-    rules_file = Path("nutrition_rules.txt")
-    if rules_file.exists():
-        rules_content = rules_file.read_text()
-        st.success("✅ FDA Rules: Loaded")
-    else:
-        st.error("❌ Rules file missing")
-        rules_content = None
-    
-    st.markdown("---")
     st.caption("🌎 VeriLabel v3.1 - Mexican VNR Fixed")
 
 col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
-    if operation_mode == "🔍 Audit Existing Label":
-        mode_description = "Upload FDA label" if language == "English" else "Suba etiqueta FDA"
-    elif operation_mode == "🔄 Convert LATAM Label to FDA Format":
+    if operation_mode == "🔄 Convert LATAM Label to FDA Format":
         mode_description = "Upload LATAM label" if language == "English" else "Suba etiqueta LATAM"
     else:  # Complete Label Compliance
         mode_description = "Upload complete label (front & back)" if language == "English" else "Suba etiqueta completa (frente y reverso)"
@@ -1512,53 +1571,61 @@ with col1:
         help="Supported: JPG, PNG • Max 10MB"
     )
     
+    file_too_large = False
     if uploaded_file:
         file_size = uploaded_file.size / (1024 * 1024)
-        
+
         if file_size > 10:
-            st.error(f"⚠️ File too large: {file_size:.2f} MB")
+            st.error(f"⚠️ File too large: {file_size:.2f} MB. Please use an image under 10MB.")
+            file_too_large = True
         else:
             st.success(f"✅ Loaded: {uploaded_file.name} ({file_size:.2f} MB)")
-            st.image(uploaded_file, use_column_width=True)
+            st.image(uploaded_file, use_container_width=True)
 
 with col2:
     st.subheader(f"🔍 {t['results']}")
-    
+
     checks_passed = True
-    
+
     if not uploaded_file:
         st.info("👈 Please upload a label image")
         checks_passed = False
-    
+    elif file_too_large:
+        st.error("⚠️ Uploaded file is too large")
+        checks_passed = False
+
     if not api_key_loaded:
         st.error("⚠️ System not configured")
         checks_passed = False
-    
+
     if checks_passed:
         st.success("✅ Ready for analysis!")
 
 st.markdown("---")
 
-col_btn1, col_btn2 = st.columns([3, 1])
+if operation_mode == "🔄 Convert LATAM Label to FDA Format":
+    button_text = "🔄 Convert to FDA Format"
+else:  # Complete Label Compliance
+    button_text = "🎨 Analyze Complete Label" if language == "English" else "🎨 Analizar Etiqueta Completa"
 
-with col_btn1:
-    if operation_mode == "🔍 Audit Existing Label":
-        button_text = f"🔍 {t['analyze']}"
-    elif operation_mode == "🔄 Convert LATAM Label to FDA Format":
-        button_text = "🔄 Convert to FDA Format"
-    else:  # Complete Label Compliance
-        button_text = "🎨 Analyze Complete Label" if language == "English" else "🎨 Analizar Etiqueta Completa"
-    
-    action_button = st.button(button_text, type="primary", disabled=not checks_passed, use_container_width=True)
+action_button = st.button(button_text, type="primary", disabled=not checks_passed, use_container_width=True)
 
-with col_btn2:
-    if 'last_analysis' in st.session_state:
-        if st.button("🔄 Clear", use_container_width=True):
-            del st.session_state.last_analysis
-            st.rerun()
+def encode_image(uploaded_file) -> str:
+    """Encode uploaded image as a base64 data URL."""
+    image_bytes = uploaded_file.getvalue()
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    return f"data:{uploaded_file.type};base64,{base64_image}"
 
-if 'analysis_history' not in st.session_state:
-    st.session_state.analysis_history = []
+
+def clean_json_response(text: str) -> str:
+    """Extract JSON object from an API response, stripping any markdown or surrounding text."""
+    # Try to extract a JSON object via regex first
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        return match.group(0).strip()
+    # Fallback: strip code fences manually
+    return text.replace('```json', '').replace('```', '').strip()
+
 
 # ============================================================================
 # CONVERTER ENGINE - FIXED FOR MEXICAN VITAMINS
@@ -1574,15 +1641,11 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
         try:
             status_text.text("📊 Step 1/4: Extracting data...")
             progress_bar.progress(20)
-            
-            image_bytes = uploaded_file.getvalue()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            image_type = uploaded_file.type
-            image_data_url = f"data:{image_type};base64,{base64_image}"
-            
-            openai.api_key = api_key
-            
-            extraction_response = openai.ChatCompletion.create(
+
+            image_data_url = encode_image(uploaded_file)
+            client = OpenAI(api_key=api_key)
+
+            extraction_response = client.chat.completions.create(
                 model=model_choice,
                 messages=[
                     {"role": "system", "content": ENHANCED_EXTRACTION_PROMPT},
@@ -1594,21 +1657,16 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                         ]
                     }
                 ],
-                max_tokens=1500,
-                temperature=0.0
+                max_tokens=2500,
+                temperature=temperature
             )
-            
+
             status_text.text("✅ Data extracted!")
             progress_bar.progress(40)
-            
-            data_text = extraction_response['choices'][0]['message']['content']
-            data_text = data_text.replace('```json', '').replace('```', '').strip()
+
+            data_text = clean_json_response(extraction_response.choices[0].message.content)
             nutrition_data = json.loads(data_text)
-            
-            # DEBUG: Show what was extracted
-            with st.expander("🔍 Debug: Extracted Data", expanded=False):
-                st.json(nutrition_data)
-            
+
             status_text.text("🔍 Step 2/4: Validating FDA compliance + Converting Mexican vitamins...")
             progress_bar.progress(55)
             
@@ -1650,12 +1708,24 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                             st.info(warning)  # Highlight Mexican conversions
                         else:
                             st.warning(warning)
-            
+
+            # --- Data quality warnings ---
+            spc_val = corrected_data.get('servings_per_container')
+            if spc_val is None:
+                st.warning("⚠️ **Servings per container** could not be extracted from the source label. The FDA label shows ⚠ VERIFY — please check the original label and enter the correct value manually.")
+            elif str(spc_val).strip() == '1':
+                st.warning("⚠️ **Servings per container** was extracted as 1. Please verify this against the source label — many LATAM labels list servings per 100g/100ml, making the total number of servings higher than 1.")
+
+            if corrected_data.get('fiber_g') is None:
+                st.warning("⚠️ **Dietary Fiber** not found on source label — omitted from FDA label. Add manually if available.")
+            if corrected_data.get('added_sugars_g') is None:
+                st.warning("⚠️ **Added Sugars** not found on source label — omitted from FDA label. Add manually if available.")
+
             col_compare1, col_compare2 = st.columns(2)
             
             with col_compare1:
                 st.subheader("📋 Original Label")
-                st.image(uploaded_file, use_column_width=True)
+                st.image(uploaded_file, use_container_width=True)
             
             with col_compare2:
                 st.subheader("📋 PERFECT FDA Label")
@@ -1669,35 +1739,39 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                 "✅ Trans fat <0.5g displays as 0g (FDA rule)",
                 "✅ Calories rounded per FDA rules (no decimals)",
                 "✅ All rounding rules applied correctly",
-                "✅ Mexican VNR converted to FDA values",
                 "✅ Proper font sizes and weights",
                 "✅ Correct bar thicknesses",
                 "✅ Standard 3.5-inch width",
                 "✅ Print-ready quality"
             ]
-            
+
+            # Only show VNR item if the label actually had Mexican VNR data
+            vnr_converted = any('VNR' in w or '🇲🇽' in w for w in validation.get('warnings', []))
+            if vnr_converted:
+                checklist.insert(4, "✅ Mexican VNR converted to FDA values")
+
             for item in checklist:
                 st.markdown(item)
             
             st.markdown("---")
             st.subheader("📥 Download Options")
             
-            col_dl1, col_dl2, col_dl3 = st.columns(3)
-            
+            col_dl1, col_dl2 = st.columns(2)
+
             with col_dl1:
                 st.download_button(
                     "🌐 Download HTML Label",
                     data=fda_label_html,
-                    file_name=f"FDA_Label_Perfect.html",
+                    file_name="FDA_Label_Perfect.html",
                     mime="text/html",
                     use_container_width=True
                 )
-            
+
             with col_dl2:
                 st.download_button(
                     "📊 Download Data (JSON)",
                     data=json.dumps(corrected_data, indent=2, ensure_ascii=False),
-                    file_name=f"FDA_Data.json",
+                    file_name="FDA_Data.json",
                     mime="application/json",
                     use_container_width=True
                 )
@@ -1717,7 +1791,6 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             status_text.empty()
             st.error(f"❌ Conversion failed: {str(e)}")
             with st.expander("🔍 Error Details"):
-                import traceback
                 st.code(traceback.format_exc())
 
 # ============================================================================
@@ -1734,15 +1807,11 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
         try:
             status_text.text("📊 Step 1/3: Analyzing complete label..." if language == "English" else "📊 Paso 1/3: Analizando etiqueta completa...")
             progress_bar.progress(30)
-            
-            image_bytes = uploaded_file.getvalue()
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            image_type = uploaded_file.type
-            image_data_url = f"data:{image_type};base64,{base64_image}"
-            
-            openai.api_key = api_key
-            
-            extraction_response = openai.ChatCompletion.create(
+
+            image_data_url = encode_image(uploaded_file)
+            client = OpenAI(api_key=api_key)
+
+            extraction_response = client.chat.completions.create(
                 model=model_choice,
                 messages=[
                     {"role": "system", "content": COMPLETE_LABEL_EXTRACTION_PROMPT},
@@ -1755,14 +1824,13 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
                     }
                 ],
                 max_tokens=2000,
-                temperature=0.0
+                temperature=temperature
             )
-            
+
             status_text.text("✅ Label data extracted!" if language == "English" else "✅ ¡Datos de etiqueta extraídos!")
             progress_bar.progress(60)
-            
-            data_text = extraction_response['choices'][0]['message']['content']
-            data_text = data_text.replace('```json', '').replace('```', '').strip()
+
+            data_text = clean_json_response(extraction_response.choices[0].message.content)
             label_data = json.loads(data_text)
             
             status_text.text("🔍 Step 2/3: Checking FDA compliance..." if language == "English" else "🔍 Paso 2/3: Verificando cumplimiento FDA...")
@@ -1773,17 +1841,101 @@ if operation_mode == "🎨 Complete Label Compliance" and action_button:
             
             status_text.text("✅ Complete analysis done!" if language == "English" else "✅ ¡Análisis completo terminado!")
             progress_bar.progress(100)
-            
-            # Display results (rest of complete compliance code continues as before)
-            st.success("✅ Complete Label Analysis Complete!")
-            
             progress_bar.empty()
             status_text.empty()
+
+            # ── Overall status ──────────────────────────────────────────────
+            score = compliance_report['compliance_score']
+            summary = compliance_report['audit_summary']
+
+            if compliance_report['export_ready']:
+                st.success(f"✅ {compliance_report['status']}  |  Score: {score}/100")
+            elif summary['critical_issues'] <= 2:
+                st.warning(f"⚠️ {compliance_report['status']}  |  Score: {score}/100")
+            else:
+                st.error(f"❌ {compliance_report['status']}  |  Score: {score}/100")
+
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            col_s1.metric("Critical Issues", summary['critical_issues'])
+            col_s2.metric("Major Issues", summary['major_issues'])
+            col_s3.metric("Checks Passed", summary['passed_checks'])
+            col_s4.metric("Risk Level", summary['risk_level'])
+
+            # ── Critical issues ─────────────────────────────────────────────
+            issues = compliance_report['issues']
+            if issues['critical']:
+                st.markdown("### ❌ Critical Issues (Export Blockers)")
+                for item in issues['critical']:
+                    with st.expander(f"🚫 {item['requirement']}"):
+                        st.error(f"**Issue:** {item['issue']}")
+                        st.info(f"**Fix:** {item['fix']}")
+                        st.warning(f"**Risk:** {item['risk']}")
+                        st.caption(f"Regulation: {item['regulation']}")
+
+            # ── Major issues ────────────────────────────────────────────────
+            if issues['major']:
+                st.markdown("### ⚠️ Major Issues")
+                for item in issues['major']:
+                    with st.expander(f"⚠️ {item['requirement']}"):
+                        st.warning(f"**Issue:** {item['issue']}")
+                        st.info(f"**Fix:** {item['fix']}")
+                        st.caption(f"Regulation: {item['regulation']}")
+
+            # ── Minor issues ─────────────────────────────────────────────────
+            if issues['minor']:
+                with st.expander(f"📝 {len(issues['minor'])} Minor Issues", expanded=False):
+                    for item in issues['minor']:
+                        if isinstance(item, dict):
+                            st.info(f"**{item.get('requirement', 'Minor Issue')}:** {item.get('issue', '')}")
+                            if item.get('fix'):
+                                st.caption(f"Fix: {item['fix']}")
+                        else:
+                            st.info(item)
+
+            # ── Passed checks ────────────────────────────────────────────────
+            if issues['passed']:
+                with st.expander(f"✅ {len(issues['passed'])} Checks Passed"):
+                    for item in issues['passed']:
+                        st.markdown(item)
+
+            # ── Changes to make ──────────────────────────────────────────────
+            if compliance_report['changes_made']:
+                st.markdown("### 🔧 Required Changes")
+                for change in compliance_report['changes_made']:
+                    st.markdown(f"- {change}")
+
+            # ── Allergens ────────────────────────────────────────────────────
+            allergens = compliance_report.get('detected_allergens', {})
+            if allergens:
+                st.markdown("### 🥜 Detected Allergens")
+                allergen_names = [a.replace('_', ' ').title() for a in allergens.keys()]
+                st.info(f"Found: **{', '.join(allergen_names)}**")
+
+            # ── Redesign spec download ────────────────────────────────────────
+            redesign = compliance_report.get('redesign_data', {})
+            if redesign and redesign.get('label_format'):
+                st.markdown("### 📥 Download")
+                st.download_button(
+                    "📋 Download FDA Redesign Specification (JSON)",
+                    data=json.dumps(redesign, indent=2, ensure_ascii=False),
+                    file_name="FDA_Redesign_Spec.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
             
+        except json.JSONDecodeError as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error("❌ Could not parse label data — AI returned unexpected format")
+            with st.expander("🔍 Debug Info"):
+                st.code(data_text)
+
         except Exception as e:
             progress_bar.empty()
             status_text.empty()
             st.error(f"❌ Analysis failed: {str(e)}")
+            with st.expander("🔍 Error Details"):
+                st.code(traceback.format_exc())
 
 st.markdown("---")
-st.caption("🌎 Complete FDA Compliance Platform for International Exporters | © 2026 VeriLabel v3.1 - Mexican VNR Fixed")
+st.caption("🌎 Complete FDA Compliance Platform for International Exporters | © 2026 VeriLabel v3.1")
