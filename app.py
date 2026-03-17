@@ -1580,7 +1580,7 @@ with col1:
             file_too_large = True
         else:
             st.success(f"✅ Loaded: {uploaded_file.name} ({file_size:.2f} MB)")
-            st.image(uploaded_file, use_container_width=True)
+            st.image(uploaded_file)
 
 with col2:
     st.subheader(f"🔍 {t['results']}")
@@ -1725,7 +1725,7 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             
             with col_compare1:
                 st.subheader("📋 Original Label")
-                st.image(uploaded_file, use_container_width=True)
+                st.image(uploaded_file)
             
             with col_compare2:
                 st.subheader("📋 PERFECT FDA Label")
