@@ -616,7 +616,8 @@ CRITICAL INSTRUCTIONS:
 - Note cultural/regional labeling elements (sellos, warnings, etc.)
 - SERVINGS PER CONTAINER: Extract the EXACT value. NEVER default to 1. If not found, return null.
 - SERVING SIZE: serving_size_original must be the FULL text as shown. Do NOT leave empty.
-- FIBER & ADDED SUGARS: Only extract if EXPLICITLY on the label. Return null if not present — NEVER infer.
+- FIBER, TOTAL SUGARS & ADDED SUGARS: Only extract if EXPLICITLY on the label. Return null if not present — NEVER infer.
+- CHOLESTEROL: Only extract cholesterol_mg if explicitly listed. If not shown, return null — never assume 0mg.
 
 Extract now:"""
 
@@ -755,12 +756,22 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     total_fat = apply_fda_rounding_rules(get_val('total_fat_g'), 'total_fat')
     saturated_fat = apply_fda_rounding_rules(get_val('saturated_fat_g'), 'saturated_fat')
     trans_fat = apply_fda_rounding_rules(get_val('trans_fat_g'), 'trans_fat')
-    cholesterol = apply_fda_rounding_rules(get_val('cholesterol_mg'), 'cholesterol')
+    cholesterol = apply_fda_rounding_rules(get_val('cholesterol_mg'), 'cholesterol') if is_present('cholesterol_mg') else None
     sodium = apply_fda_rounding_rules(get_val('sodium_mg'), 'sodium')
     total_carb = apply_fda_rounding_rules(get_val('total_carb_g'), 'total_carb')
     fiber = apply_fda_rounding_rules(get_val('fiber_g'), 'fiber') if is_present('fiber_g') else None
-    total_sugars = apply_fda_rounding_rules(get_val('total_sugars_g'), 'total_sugars')
-    added_sugars = apply_fda_rounding_rules(get_val('added_sugars_g'), 'added_sugars') if is_present('added_sugars_g') else None
+    total_sugars = apply_fda_rounding_rules(get_val('total_sugars_g'), 'total_sugars') if is_present('total_sugars_g') else None
+
+    # Added Sugars decision logic (mandatory FDA field — never omit)
+    if is_present('added_sugars_g'):
+        added_sugars = apply_fda_rounding_rules(get_val('added_sugars_g'), 'added_sugars')
+        added_sugars_unknown = False
+    elif total_sugars is not None and float(total_sugars) == 0:
+        added_sugars = '0'          # safe inference: no sugars → no added sugars
+        added_sugars_unknown = False
+    else:
+        added_sugars = None         # unknown — show "?g" flag in label
+        added_sugars_unknown = True
     protein = apply_fda_rounding_rules(get_val('protein_g'), 'protein')
     vitamin_d = apply_fda_rounding_rules(get_val('vitamin_d_mcg'), 'vitamin_d_mcg')
     calcium = apply_fda_rounding_rules(get_val('calcium_mg'), 'calcium_mg')
@@ -881,10 +892,11 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             
             <div class="nutrient-row">
                 <div class="nutrient-label">
-                    <span class="nutrient-main">Cholesterol</span> <span class="nutrient-amount">{cholesterol}mg</span>
+                    <span class="nutrient-main">Cholesterol</span> <span class="nutrient-amount">{'<span style="color:red;">?mg</span>' if cholesterol is None else cholesterol + 'mg'}</span>
                 </div>
-                <div class="nutrient-dv">{get_dv('cholesterol')}%</div>
+                <div class="nutrient-dv">{'&nbsp;' if cholesterol is None else str(get_dv('cholesterol')) + '%'}</div>
             </div>
+            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:2pt;">⚠ Not on source label — verify before printing</div>' if cholesterol is None else ''}
             <div class="bar-thin"></div>
             
             <div class="nutrient-row">
@@ -907,13 +919,21 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
 
             <div class="nutrient-row nutrient-indent-1">
                 <div class="nutrient-label">
-                    <span class="nutrient-amount">Total Sugars {total_sugars}g</span>
+                    <span class="nutrient-amount">Total Sugars {'<span style="color:red;">?g</span>' if total_sugars is None else str(total_sugars) + 'g'}</span>
                 </div>
                 <div class="nutrient-dv"></div>
             </div>
+            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:12pt;">⚠ Not on source label — verify before printing</div>' if total_sugars is None else ''}
             <div class="bar-thin"></div>
 
-            {'<div class="nutrient-row nutrient-indent-2"><div class="nutrient-label"><span class="nutrient-amount">Includes ' + str(added_sugars) + 'g Added Sugars</span></div><div class="nutrient-dv">' + str(get_dv('added_sugars')) + '%</div></div><div class="bar-thin"></div>' if added_sugars is not None else ''}
+            <div class="nutrient-row nutrient-indent-2">
+                <div class="nutrient-label">
+                    <span class="nutrient-amount">{'Includes <span style="color:red;">?g</span> Added Sugars' if added_sugars_unknown else 'Includes ' + str(added_sugars) + 'g Added Sugars'}</span>
+                </div>
+                <div class="nutrient-dv">{'&nbsp;' if added_sugars_unknown else str(get_dv('added_sugars')) + '%'}</div>
+            </div>
+            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:22pt;">⚠ Not on source label — required by FDA. Enter value before printing.</div>' if added_sugars_unknown else ''}
+            <div class="bar-thin"></div>
             
             <div class="nutrient-row">
                 <div class="nutrient-label">
@@ -1080,6 +1100,11 @@ class FDALabelValidator:
             return False, f"Error validating calories: {str(e)}", 0
     
     @staticmethod
+    def format_serving_grams(val) -> str:
+        """Return int string for whole numbers, decimal otherwise (12.0 → '12', 12.5 → '12.5')"""
+        f = float(val)
+        return str(int(f)) if f == int(f) else str(f)
+
     def convert_metric_to_us_serving(metric_str: str) -> str:
         """Convert metric serving sizes to US household measures"""
         if not metric_str:
@@ -1117,22 +1142,23 @@ class FDALabelValidator:
             amount = float(match.group(1))
             unit = match.group(2)
             
+            fg = format_serving_grams(amount)
             if unit == 'g':
                 if amount <= 5:
-                    return f"1 tsp ({amount}g)"
+                    return f"1 tsp ({fg}g)"
                 elif amount <= 15:
-                    return f"1 tbsp ({amount}g)"
+                    return f"1 tbsp ({fg}g)"
                 elif amount <= 30:
-                    return f"2 tbsp ({amount}g)"
+                    return f"2 tbsp ({fg}g)"
                 elif amount <= 45:
-                    return f"1/4 cup ({int(amount)}g)"
+                    return f"1/4 cup ({fg}g)"
                 elif amount <= 65:
-                    return f"1/3 cup ({int(amount)}g)"
+                    return f"1/3 cup ({fg}g)"
                 elif amount <= 90:
-                    return f"1/2 cup ({int(amount)}g)"
+                    return f"1/2 cup ({fg}g)"
                 else:
                     oz = round(amount / 28.35, 1)
-                    return f"{oz} oz ({int(amount)}g)"
+                    return f"{oz} oz ({fg}g)"
             elif unit == 'ml':
                 if amount <= 5:
                     return f"1 tsp ({int(amount)}mL)"
@@ -1324,7 +1350,7 @@ class EnhancedFDAConverter:
                     corrected[key] = value
 
         # Fields that must stay None if not explicitly on the label — never default to 0
-        NULLABLE_FIELDS = {'fiber_g', 'added_sugars_g'}
+        NULLABLE_FIELDS = {'fiber_g', 'added_sugars_g', 'total_sugars_g', 'cholesterol_mg'}
 
         numeric_fields = [
             'calories', 'total_fat_g', 'saturated_fat_g', 'trans_fat_g',
@@ -1425,6 +1451,10 @@ ENHANCED_EXTRACTION_PROMPT = """You are an expert FDA nutrition label data extra
 8. DIETARY FIBER: Only extract fiber_g if it is EXPLICITLY listed on the label. If not shown, return null — not 0. NEVER infer or assume this value.
 
 9. ADDED SUGARS: Only extract added_sugars_g if it is EXPLICITLY listed on the label. If not shown, return null — not 0. NEVER infer or assume this value.
+
+10. TOTAL SUGARS: Only extract total_sugars_g if it is EXPLICITLY listed on the label. If not shown, return null — not 0. NEVER assume 0.
+
+11. CHOLESTEROL: Only extract cholesterol_mg if it is EXPLICITLY listed on the label. If not shown, return null — never assume 0mg.
 
 RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
 
@@ -1788,10 +1818,20 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             elif str(spc_val).strip() == '1':
                 st.warning("⚠️ **Servings per container** was extracted as 1. Please verify this against the source label — many LATAM labels list servings per 100g/100ml, making the total number of servings higher than 1.")
 
+            if corrected_data.get('cholesterol_mg') is None:
+                st.warning("⚠️ **Cholesterol** not found on source label — cannot assume 0mg. Shown as '?mg' on label. Verify before printing.")
+            if corrected_data.get('total_sugars_g') is None:
+                st.warning("⚠️ **Total Sugars** not found on source label — value unknown. Do not assume 0. Shown as '?g' on label.")
+            # Added Sugars: determine which case applies
+            _as = corrected_data.get('added_sugars_g')
+            _ts = corrected_data.get('total_sugars_g')
+            if _as is None:
+                if _ts is not None and _safe_float(_ts) == 0:
+                    st.info("ℹ️ **Added Sugars** inferred as 0g because Total Sugars = 0g.")
+                else:
+                    st.error("❌ **Added Sugars** is a mandatory FDA field and was not found on the source label. You must obtain this value from the manufacturer or lab analysis before this label is print-ready.")
             if corrected_data.get('fiber_g') is None:
                 st.warning("⚠️ **Dietary Fiber** not found on source label — omitted from FDA label. Add manually if available.")
-            if corrected_data.get('added_sugars_g') is None:
-                st.warning("⚠️ **Added Sugars** not found on source label — omitted from FDA label. Add manually if available.")
 
             col_compare1, col_compare2 = st.columns(2)
             
