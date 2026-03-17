@@ -1092,15 +1092,17 @@ class FDALabelValidator:
             '24.2g': '2 tbsp (24.2g)', '24g': '2 tbsp (24g)',
             '50g': '1/4 cup (50g)', '100g': '3.5 oz (100g)', '150g': '5.3 oz (150g)',
             '200g': '7 oz (200g)', '227g': '8 oz (227g)',
-            '240ml': '1 cup (240mL)', '250ml': '1 cup (250mL)', '120ml': '1/2 cup (120mL)',
-            '180ml': '3/4 cup (180mL)', '15ml': '1 tbsp (15mL)', '5ml': '1 tsp (5mL)',
+            '5ml': '1 tsp (5mL)', '15ml': '1 tbsp (15mL)', '30ml': '2 tbsp (30mL)',
+            '60ml': '2 fl oz (60mL)', '100ml': '3.4 fl oz (100mL)',
+            '120ml': '1/2 cup (120mL)', '180ml': '3/4 cup (180mL)',
+            '240ml': '1 cup (240mL)', '250ml': '1 cup (250mL)',
             '355ml': '12 fl oz (355mL)', '500ml': '2 cups (500mL)',
         }
         
         if metric_str in conversions:
             return conversions[metric_str]
         
-        match = re.match(r'(\d+\.?\d*)\s*(g|ml)', metric_str)
+        match = re.match(r'(\d+\.?\d*)\s*(g|ml|mL)', metric_str, re.IGNORECASE)
         if match:
             amount = float(match.group(1))
             unit = match.group(2)
@@ -1305,24 +1307,26 @@ class EnhancedFDAConverter:
             else:
                 corrected[field] = None if field in NULLABLE_FIELDS else '0'
 
-        # Preserve serving size fields
-        if 'nutrition_facts' in data:
-            corrected['serving_size_original'] = data['nutrition_facts'].get('serving_size_original', '')
-            corrected['serving_size_metric'] = data['nutrition_facts'].get('serving_size_metric', '')
-            # servings_per_container: preserve null — never default to '1'
-            raw_spc = data['nutrition_facts'].get('servings_per_container')
-            if raw_spc is None or raw_spc == '' or raw_spc == 'null':
-                corrected['servings_per_container'] = None
-            else:
-                corrected['servings_per_container'] = str(raw_spc)
-        elif 'servings_per_container' in data:
-            raw_spc = data.get('servings_per_container')
-            if raw_spc is None or raw_spc == '' or raw_spc == 'null':
-                corrected['servings_per_container'] = None
-            else:
-                corrected['servings_per_container'] = str(raw_spc)
-        else:
+        # Preserve serving size fields — prefer nested nutrition_facts values but
+        # fall back to top-level values (flat structure from ENHANCED_EXTRACTION_PROMPT)
+        nf_nested = data.get('nutrition_facts', {})
+        if not isinstance(nf_nested, dict):
+            nf_nested = {}
+
+        nested_orig   = nf_nested.get('serving_size_original', '') or ''
+        nested_metric = nf_nested.get('serving_size_metric', '') or ''
+        top_orig      = data.get('serving_size_original', '') or ''
+        top_metric    = data.get('serving_size_metric', '') or ''
+
+        corrected['serving_size_original'] = nested_orig or top_orig
+        corrected['serving_size_metric']   = nested_metric or top_metric
+
+        # servings_per_container: preserve null — never default to '1'
+        raw_spc = nf_nested.get('servings_per_container') or data.get('servings_per_container')
+        if raw_spc is None or raw_spc == '' or raw_spc == 'null':
             corrected['servings_per_container'] = None
+        else:
+            corrected['servings_per_container'] = str(raw_spc)
 
         return corrected
     
@@ -1667,12 +1671,27 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             data_text = clean_json_response(extraction_response.choices[0].message.content)
             nutrition_data = json.loads(data_text)
 
+            with st.expander("🔍 Debug: Raw AI Extraction JSON", expanded=False):
+                st.json(nutrition_data)
+                nf_debug = nutrition_data.get('nutrition_facts', {})
+                st.write("**serving_size_original (top):**", nutrition_data.get('serving_size_original'))
+                st.write("**serving_size_metric (top):**", nutrition_data.get('serving_size_metric'))
+                st.write("**serving_size_original (nested):**", nf_debug.get('serving_size_original') if isinstance(nf_debug, dict) else 'n/a')
+                st.write("**serving_size_metric (nested):**", nf_debug.get('serving_size_metric') if isinstance(nf_debug, dict) else 'n/a')
+                st.write("**servings_per_container:**", nutrition_data.get('servings_per_container') or (nf_debug.get('servings_per_container') if isinstance(nf_debug, dict) else None))
+
             status_text.text("🔍 Step 2/4: Validating FDA compliance + Converting Mexican vitamins...")
             progress_bar.progress(55)
             
             converter = EnhancedFDAConverter()
             corrected_data = converter.extract_and_validate(nutrition_data)
-            
+
+            with st.expander("🔍 Debug: Resolved Serving Size Fields", expanded=False):
+                st.write("**serving_size_original:**", corrected_data.get('serving_size_original'))
+                st.write("**serving_size_metric:**", corrected_data.get('serving_size_metric'))
+                st.write("**serving_size_us:**", corrected_data.get('serving_size_us'))
+                st.write("**servings_per_container:**", corrected_data.get('servings_per_container'))
+
             status_text.text("🔄 Step 3/4: Converting to US format...")
             progress_bar.progress(70)
             
