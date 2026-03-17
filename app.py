@@ -1105,6 +1105,7 @@ class FDALabelValidator:
         f = float(val)
         return str(int(f)) if f == int(f) else str(f)
 
+    @staticmethod
     def convert_metric_to_us_serving(metric_str: str) -> str:
         """Convert metric serving sizes to US household measures"""
         if not metric_str:
@@ -1142,7 +1143,7 @@ class FDALabelValidator:
             amount = float(match.group(1))
             unit = match.group(2)
             
-            fg = format_serving_grams(amount)
+            fg = FDALabelValidator.format_serving_grams(amount)
             if unit == 'g':
                 if amount <= 5:
                     return f"1 tsp ({fg}g)"
