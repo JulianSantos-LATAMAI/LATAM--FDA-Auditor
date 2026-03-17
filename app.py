@@ -562,7 +562,10 @@ Return ONLY valid JSON with this exact structure:
         "format": "Chilean/Mexican/Brazilian/US/Other",
         "serving_size_original": "FULL text exactly as shown on label (e.g., '25g (1½ Taza de Té)' or '100ml') — NEVER leave empty",
         "serving_size_metric": "just the metric portion (e.g., '30g' or '100ml')",
+        "serving_size_ml": "number or null — serving size in ml only if liquid (e.g., 100 for a 100ml serving)",
         "servings_per_container": "number or null if not found — NEVER default to 1 unless label explicitly states 1",
+        "total_calories_per_container": "number or null — total kcal for the whole container if stated (e.g., 130 from 'Contenido energético por envase: 130 kcal')",
+        "container_volume_ml": "number or null — total volume of the container in ml (e.g., 600 from '600ml' in the net quantity line)",
         "calories": "number",
         "total_fat_g": "number",
         "saturated_fat_g": "number",
@@ -734,12 +737,18 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     def get_dv(key):
         return percent_dv.get(key, 0)
 
-    # Servings per container — None means unknown, display warning
+    # Servings per container — handle calculated vs explicit vs unknown
     raw_spc = nutrition_data.get('servings_per_container')
+    spc_calculated = nutrition_data.get('servings_per_container_calculated', False)
     if raw_spc is None or raw_spc == '' or raw_spc == 'null':
         servings_display = '<span style="color:red;font-weight:700;">⚠ VERIFY</span>'
+        spc_footnote = ''
+    elif spc_calculated:
+        servings_display = f'<span>About {raw_spc} *</span>'
+        spc_footnote = '<div style="font-size:6pt;font-style:italic;margin-top:4pt;">* Calculated from container size — verify before printing.</div>'
     else:
         servings_display = f'<span>{raw_spc}</span>'
+        spc_footnote = ''
 
     # Apply FDA rounding rules
     calories = apply_fda_rounding_rules(get_val('calories'), 'calories')
@@ -951,6 +960,7 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             <div class="footnote">
                 * The % Daily Value (DV) tells you how much a nutrient in a serving of food contributes to a daily diet. 2,000 calories a day is used for general nutrition advice.
             </div>
+            {spc_footnote}
         </div>
         
         <div class="instructions no-print">
@@ -1188,7 +1198,42 @@ class EnhancedFDAConverter:
         else:
             us_serving = ''
         corrected_data['serving_size_us'] = us_serving
-        
+
+        # Fallback calculation for servings_per_container when AI returns null
+        if corrected_data.get('servings_per_container') is None:
+            spc_calc = None
+            spc_method = None
+
+            # Method 1: total_calories_per_container / calories_per_serving
+            total_cal = _safe_float(corrected_data.get('total_calories_per_container'))
+            cal_per_serving = _safe_float(corrected_data.get('calories'))
+            if total_cal > 0 and cal_per_serving > 0:
+                spc_calc = round(total_cal / cal_per_serving)
+                spc_method = 'calories'
+
+            # Method 2: container_volume_ml / serving_size_ml
+            if spc_calc is None:
+                container_ml = _safe_float(corrected_data.get('container_volume_ml'))
+                serving_ml = _safe_float(corrected_data.get('serving_size_ml'))
+                # Derive serving_ml from serving_size_metric if AI didn't return it
+                if serving_ml == 0 and corrected_data.get('serving_size_metric'):
+                    m = re.match(r'(\d+\.?\d*)\s*ml', corrected_data['serving_size_metric'], re.IGNORECASE)
+                    if m:
+                        serving_ml = float(m.group(1))
+                if container_ml > 0 and serving_ml > 0:
+                    spc_calc = round(container_ml / serving_ml)
+                    spc_method = 'volume'
+
+            if spc_calc and spc_calc > 0:
+                corrected_data['servings_per_container'] = str(spc_calc)
+                corrected_data['servings_per_container_calculated'] = True
+                corrected_data['servings_per_container_calc_method'] = spc_method
+                self.warnings.append(
+                    f"ℹ️ Servings per container ({spc_calc}) was calculated from "
+                    f"{'total container calories ÷ calories per serving' if spc_method == 'calories' else 'container volume ÷ serving size'}"
+                    f" — verify before printing."
+                )
+
         corrected_data['percent_dv'] = self._calculate_all_dv(corrected_data)
         
         corrected_data['validation_report'] = {
@@ -1387,7 +1432,10 @@ RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
     "product_name": "exact name",
     "serving_size_original": "FULL text exactly as shown on label (e.g., '25g (1½ Taza de Té)' or '100ml') — NEVER leave empty",
     "serving_size_metric": "just the metric portion (e.g., '25g' or '100ml')",
+    "serving_size_ml": "number or null — serving size in ml only if liquid (e.g., 100 for a 100ml serving)",
     "servings_per_container": "number or null if not found — NEVER default to 1",
+    "total_calories_per_container": "number or null — total kcal for the whole container if stated (e.g., 130 from 'Contenido energético por envase: 130 kcal')",
+    "container_volume_ml": "number or null — total volume of the container in ml (e.g., 600 from '600ml' in the net quantity line)",
     "calories": "number",
     "total_fat_g": "number",
     "saturated_fat_g": "number",
@@ -1730,8 +1778,13 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
 
             # --- Data quality warnings ---
             spc_val = corrected_data.get('servings_per_container')
+            spc_was_calculated = corrected_data.get('servings_per_container_calculated', False)
             if spc_val is None:
-                st.warning("⚠️ **Servings per container** could not be extracted from the source label. The FDA label shows ⚠ VERIFY — please check the original label and enter the correct value manually.")
+                st.warning("⚠️ **Servings per container** could not be extracted or calculated from the source label. The FDA label shows ⚠ VERIFY — please check the original label and enter the correct value manually.")
+            elif spc_was_calculated:
+                method = corrected_data.get('servings_per_container_calc_method', '')
+                method_label = "total container calories ÷ calories per serving" if method == 'calories' else "container volume ÷ serving size"
+                st.info(f"ℹ️ **Servings per container** ({spc_val}) was not stated on the label — calculated from {method_label}. Shown as \"About {spc_val} *\" on the label. **Verify before printing.**")
             elif str(spc_val).strip() == '1':
                 st.warning("⚠️ **Servings per container** was extracted as 1. Please verify this against the source label — many LATAM labels list servings per 100g/100ml, making the total number of servings higher than 1.")
 
