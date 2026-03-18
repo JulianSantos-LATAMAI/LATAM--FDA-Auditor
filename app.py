@@ -569,8 +569,8 @@ Return ONLY valid JSON with this exact structure:
         "calories": "number",
         "total_fat_g": "number",
         "saturated_fat_g": "number",
-        "trans_fat_g": "number",
-        "cholesterol_mg": "number",
+        "trans_fat_g": "number or null if NOT explicitly on label — NEVER assume 0",
+        "cholesterol_mg": "number or null if NOT explicitly on label — NEVER assume 0",
         "sodium_mg": "number",
         "total_carb_g": "number",
         "fiber_g": "number or null if NOT explicitly on label — NEVER infer or assume",
@@ -618,6 +618,7 @@ CRITICAL INSTRUCTIONS:
 - SERVING SIZE: serving_size_original must be the FULL text as shown. Do NOT leave empty.
 - FIBER, TOTAL SUGARS & ADDED SUGARS: Only extract if EXPLICITLY on the label. Return null if not present — NEVER infer.
 - CHOLESTEROL: Only extract cholesterol_mg if explicitly listed. If not shown, return null — never assume 0mg.
+- TRANS FAT: Only extract trans_fat_g if explicitly listed on the source label. If not shown, return null — never assume 0.
 
 Extract now:"""
 
@@ -755,7 +756,7 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     calories = apply_fda_rounding_rules(get_val('calories'), 'calories')
     total_fat = apply_fda_rounding_rules(get_val('total_fat_g'), 'total_fat')
     saturated_fat = apply_fda_rounding_rules(get_val('saturated_fat_g'), 'saturated_fat')
-    trans_fat = apply_fda_rounding_rules(get_val('trans_fat_g'), 'trans_fat')
+    trans_fat = apply_fda_rounding_rules(get_val('trans_fat_g'), 'trans_fat') if is_present('trans_fat_g') else None
     cholesterol = apply_fda_rounding_rules(get_val('cholesterol_mg'), 'cholesterol') if is_present('cholesterol_mg') else None
     sodium = apply_fda_rounding_rules(get_val('sodium_mg'), 'sodium')
     total_carb = apply_fda_rounding_rules(get_val('total_carb_g'), 'total_carb')
@@ -884,7 +885,7 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             
             <div class="nutrient-row nutrient-indent-1">
                 <div class="nutrient-label">
-                    <span class="nutrient-amount"><em>Trans</em> Fat {trans_fat}g</span>
+                    <span class="nutrient-amount"><em>Trans</em> Fat {'?g' if trans_fat is None else trans_fat + 'g'}</span>
                 </div>
                 <div class="nutrient-dv"></div>
             </div>
@@ -1348,7 +1349,7 @@ class EnhancedFDAConverter:
                     corrected[key] = value
 
         # Fields that must stay None if not explicitly on the label — never default to 0
-        NULLABLE_FIELDS = {'fiber_g', 'added_sugars_g', 'total_sugars_g', 'cholesterol_mg'}
+        NULLABLE_FIELDS = {'fiber_g', 'added_sugars_g', 'total_sugars_g', 'cholesterol_mg', 'trans_fat_g'}
 
         numeric_fields = [
             'calories', 'total_fat_g', 'saturated_fat_g', 'trans_fat_g',
@@ -1454,6 +1455,8 @@ ENHANCED_EXTRACTION_PROMPT = """You are an expert FDA nutrition label data extra
 
 11. CHOLESTEROL: Only extract cholesterol_mg if it is EXPLICITLY listed on the label. If not shown, return null — never assume 0mg.
 
+12. TRANS FAT: Only extract trans_fat_g if it is EXPLICITLY listed on the source label. If not shown, return null — never assume 0.
+
 RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
 
 {
@@ -1467,8 +1470,8 @@ RETURN ONLY VALID JSON - NO MARKDOWN, NO EXPLANATIONS.
     "calories": "number",
     "total_fat_g": "number",
     "saturated_fat_g": "number",
-    "trans_fat_g": "number",
-    "cholesterol_mg": "number",
+    "trans_fat_g": "number or null if NOT explicitly on label — NEVER assume 0",
+    "cholesterol_mg": "number or null if NOT explicitly on label — NEVER assume 0",
     "sodium_mg": "number",
     "total_carb_g": "number",
     "fiber_g": "number or null if NOT explicitly on label — NEVER infer",
@@ -1816,12 +1819,15 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
             elif str(spc_val).strip() == '1':
                 st.warning("⚠️ **Servings per container** was extracted as 1. Please verify this against the source label — many LATAM labels list servings per 100g/100ml, making the total number of servings higher than 1.")
 
-            raw_calories = _safe_float(corrected_data.get('calories', 0))
-            if 0 < raw_calories < 5:
-                st.warning("⚠ Calories rounded to 0 per FDA rules (<5 kcal rounds to 0). Source label shows caloric content exists. This is FDA-compliant but verify with manufacturer.")
+            calories_raw_str = corrected_data.get('calories', '0') or '0'
+            calories_raw_val = _safe_float(calories_raw_str)
+            if calories_raw_val > 0 and apply_fda_rounding_rules(calories_raw_str, 'calories') == '0':
+                st.warning(f"⚠ Calories rounded to 0 per FDA rules — source label shows {calories_raw_val:g} kcal per serving. Compliant but verify.")
 
             if corrected_data.get('cholesterol_mg') is None:
-                st.warning("⚠️ **Cholesterol** not found on source label — cannot assume 0mg. Shown as '?mg' on label. Verify before printing.")
+                st.warning("⚠️ **Cholesterol** not found on source label — required FDA field. Shown as '?mg' on label. Verify with manufacturer before printing.")
+            if corrected_data.get('trans_fat_g') is None:
+                st.warning("⚠️ **Trans Fat** not found on source label — required FDA field. Shown as '?g' on label. Verify with manufacturer before printing.")
             if corrected_data.get('total_sugars_g') is None:
                 st.warning("⚠️ **Total Sugars** not found on source label — value unknown. Do not assume 0. Shown as '?g' on label.")
             # Added Sugars: determine which case applies
