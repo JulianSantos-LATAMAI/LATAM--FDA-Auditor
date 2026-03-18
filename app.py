@@ -742,11 +742,11 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
     raw_spc = nutrition_data.get('servings_per_container')
     spc_calculated = nutrition_data.get('servings_per_container_calculated', False)
     if raw_spc is None or raw_spc == '' or raw_spc == 'null':
-        servings_display = '<span style="color:red;font-weight:700;">⚠ VERIFY</span>'
+        servings_display = '<span>?</span>'
         spc_footnote = ''
     elif spc_calculated:
-        servings_display = f'<span>About {raw_spc} *</span>'
-        spc_footnote = '<div style="font-size:6pt;font-style:italic;margin-top:4pt;">* Calculated from container size — verify before printing.</div>'
+        servings_display = f'<span>About {raw_spc}</span>'
+        spc_footnote = ''
     else:
         servings_display = f'<span>{raw_spc}</span>'
         spc_footnote = ''
@@ -892,11 +892,10 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
             
             <div class="nutrient-row">
                 <div class="nutrient-label">
-                    <span class="nutrient-main">Cholesterol</span> <span class="nutrient-amount">{'<span style="color:red;">?mg</span>' if cholesterol is None else cholesterol + 'mg'}</span>
+                    <span class="nutrient-main">Cholesterol</span> <span class="nutrient-amount">{'?mg' if cholesterol is None else cholesterol + 'mg'}</span>
                 </div>
                 <div class="nutrient-dv">{'&nbsp;' if cholesterol is None else str(get_dv('cholesterol')) + '%'}</div>
             </div>
-            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:2pt;">⚠ Not on source label — verify before printing</div>' if cholesterol is None else ''}
             <div class="bar-thin"></div>
             
             <div class="nutrient-row">
@@ -919,20 +918,18 @@ def generate_perfect_fda_label_html(nutrition_data, percent_dv):
 
             <div class="nutrient-row nutrient-indent-1">
                 <div class="nutrient-label">
-                    <span class="nutrient-amount">Total Sugars {'<span style="color:red;">?g</span>' if total_sugars is None else str(total_sugars) + 'g'}</span>
+                    <span class="nutrient-amount">Total Sugars {'?g' if total_sugars is None else str(total_sugars) + 'g'}</span>
                 </div>
                 <div class="nutrient-dv"></div>
             </div>
-            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:12pt;">⚠ Not on source label — verify before printing</div>' if total_sugars is None else ''}
             <div class="bar-thin"></div>
 
             <div class="nutrient-row nutrient-indent-2">
                 <div class="nutrient-label">
-                    <span class="nutrient-amount">{'Includes <span style="color:red;">?g</span> Added Sugars' if added_sugars_unknown else 'Includes ' + str(added_sugars) + 'g Added Sugars'}</span>
+                    <span class="nutrient-amount">{'Includes ?g Added Sugars' if added_sugars_unknown else 'Includes ' + str(added_sugars) + 'g Added Sugars'}</span>
                 </div>
                 <div class="nutrient-dv">{'&nbsp;' if added_sugars_unknown else str(get_dv('added_sugars')) + '%'}</div>
             </div>
-            {'<div style="font-size:6pt;font-style:italic;color:red;padding-left:22pt;">⚠ Not on source label — required by FDA. Enter value before printing.</div>' if added_sugars_unknown else ''}
             <div class="bar-thin"></div>
             
             <div class="nutrient-row">
@@ -1818,6 +1815,10 @@ if operation_mode == "🔄 Convert LATAM Label to FDA Format" and action_button:
                 st.info(f"ℹ️ **Servings per container** ({spc_val}) was not stated on the label — calculated from {method_label}. Shown as \"About {spc_val} *\" on the label. **Verify before printing.**")
             elif str(spc_val).strip() == '1':
                 st.warning("⚠️ **Servings per container** was extracted as 1. Please verify this against the source label — many LATAM labels list servings per 100g/100ml, making the total number of servings higher than 1.")
+
+            raw_calories = _safe_float(corrected_data.get('calories', 0))
+            if 0 < raw_calories < 5:
+                st.warning("⚠ Calories rounded to 0 per FDA rules (<5 kcal rounds to 0). Source label shows caloric content exists. This is FDA-compliant but verify with manufacturer.")
 
             if corrected_data.get('cholesterol_mg') is None:
                 st.warning("⚠️ **Cholesterol** not found on source label — cannot assume 0mg. Shown as '?mg' on label. Verify before printing.")
